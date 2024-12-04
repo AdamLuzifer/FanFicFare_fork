@@ -9,7 +9,6 @@ import time
 from datetime import datetime
 
 import concurrent
-import base64
 
 # Third-party imports
 global requests, BeautifulSoup, ThreadPoolExecutor
@@ -51,7 +50,7 @@ class AuthorTodayAdapter(BaseSiteAdapter):
         self.username = self.getConfig("username")
         self.password = self.getConfig("password")
         self.is_adult = self.getConfig('is_adult', False)
-        self.user_id = None  # Will be set during login if needed
+        self.user_id = self.getConfig("user_id")  # Will be set during login if needed
         self.session = None  # Session for making requests
         self._logged_in = False  # Track login state
         self._login_attempts = 0  # Track number of login attempts
@@ -122,6 +121,7 @@ class AuthorTodayAdapter(BaseSiteAdapter):
         Perform login to author.today with session persistence.
         """
         if self._logged_in:
+            logger.debug('Already logged in')
             return True
 
         if not self.username:
@@ -136,6 +136,10 @@ class AuthorTodayAdapter(BaseSiteAdapter):
             
         logger.debug("Starting login process... (Attempt %d/3)", self._login_attempts)
 
+        # Проверка наличия user_id
+        if not self.user_id:
+            logger.error("user_id не установлен. Проверьте процесс входа.")
+        
         # Try to use browser cache if enabled and not checked yet
         if self.getConfig('use_browser_cache', False) and not self._browser_cache_checked:
             logger.debug("Attempting to use browser cache for login")
@@ -146,14 +150,9 @@ class AuthorTodayAdapter(BaseSiteAdapter):
                 # Test if the cached cookie works
                 test_response = self.session.get(f'https://{self.getSiteDomain()}/account')
                 if test_response.status_code == 200 and 'account/logout' in test_response.text:
-                    # Extract user ID from the response
-                    user_id_match = re.search(r'window\.app\s*=\s*{\s*.*?userId\s*:\s*[\'"]?(\d+)[\'"]?', 
-                                            test_response.text, re.DOTALL)
-                    if user_id_match:
-                        self.user_id = user_id_match.group(1)
-                        logger.debug(f"Successfully logged in using browser cache. User ID: {self.user_id}")
-                        self._logged_in = True
-                        return True
+                    logger.debug("Successfully logged in using browser cache")
+                    self._logged_in = True
+                    return True
 
         logger.debug('Will now login to URL (%s) as (%s)', 
                     f'https://{self.getSiteDomain()}/account/login',
@@ -201,22 +200,11 @@ class AuthorTodayAdapter(BaseSiteAdapter):
                     logger.debug("Login successful via JSON response")
                     self._logged_in = True
                     
-                    # Extract user ID from login response
-                    user_id_match = re.search(r'window\.app\s*=\s*{\s*.*?userId\s*:\s*[\'"]?(\d+)[\'"]?', 
-                                            response.text, re.DOTALL)
+                    # Extract user ID for decryption
+                    user_id_match = re.search(r'userId\s*=\s*(\d+)', response.text)
                     if user_id_match:
                         self.user_id = user_id_match.group(1)
                         logger.debug(f"Extracted user ID: {self.user_id}")
-                    else:
-                        # Try to get user ID from account page
-                        account_response = self.session.get(f'https://{self.getSiteDomain()}/account')
-                        user_id_match = re.search(r'window\.app\s*=\s*{\s*.*?userId\s*:\s*[\'"]?(\d+)[\'"]?',
-                                                account_response.text, re.DOTALL)
-                        if user_id_match:
-                            self.user_id = user_id_match.group(1)
-                            logger.debug(f"Extracted user ID from account page: {self.user_id}")
-                        else:
-                            logger.warning("Could not extract user ID after successful login")
                     
                     return True
                     
@@ -235,17 +223,6 @@ class AuthorTodayAdapter(BaseSiteAdapter):
                 if self.getAuthCookie():
                     self._logged_in = True
                     self._login_attempts = 0  # Reset counter on success
-                    
-                    # Try to get user ID from account page
-                    account_response = self.session.get(f'https://{self.getSiteDomain()}/account')
-                    user_id_match = re.search(r'window\.app\s*=\s*{\s*.*?userId\s*:\s*[\'"]?(\d+)[\'"]?',
-                                            account_response.text, re.DOTALL)
-                    if user_id_match:
-                        self.user_id = user_id_match.group(1)
-                        logger.debug(f"Extracted user ID from account page: {self.user_id}")
-                    else:
-                        logger.warning("Could not extract user ID after successful cookie login")
-                    
                     logger.debug("Login successful via cookie check")
                     return True
                 else:
@@ -299,79 +276,61 @@ class AuthorTodayAdapter(BaseSiteAdapter):
         except:
             return False
 
-    def decrypt_chapter_text(self, data, secret):
+    def decrypt_chapter_text(self, encrypted_text, reader_secret):
         """
         Decrypt the chapter text using the reader secret.
-        Matches JavaScript implementation exactly:
-        let ss = secret.split("").reverse().join("") + "@_@" + (app.userId || "");
         
         Args:
-            data (dict): The encrypted data object from the server
-            secret (str): The reader secret key
-        
+            encrypted_text (str): The encrypted text from the server
+            reader_secret (str): The reader secret key
+            
         Returns:
             str: The decrypted text, or empty string if decryption fails
         """
         try:
-            if not data or not secret or 'text' not in data:
-                logger.error("Missing required data for decryption")
+            if not encrypted_text or not reader_secret:
                 return ''
-            
-            encrypted_text = data['text']
-            if not encrypted_text:
-                logger.error("No encrypted text found")
-                return ''
-            
-            # Create decryption key exactly like JavaScript
-            # 1. Reverse the secret
-            reversed_secret = secret[::-1]
-            # 2. Add "@_@" and userId 
-            user_id = self.user_id or self.getConfig('user_id', '')
-            key = reversed_secret + '@_@' + str(user_id)
-            
-            # Get lengths for XOR operation
+                
+            # Create decryption key by reversing reader_secret and appending user_id
+            key = reader_secret[::-1] + "@_@" + (self.user_id or "")
             key_len = len(key)
             text_len = len(encrypted_text)
             
-            # Decrypt using XOR with the key
+            # Convert text to list of character codes
+            text_codes = [ord(c) for c in encrypted_text]
+            key_codes = [ord(c) for c in key]
+            
+            # Decrypt using XOR with cycling key
             result = []
             for pos in range(text_len):
-                # Get key character (cycling through key)
-                key_char = key[pos % key_len]
-                # Get text character
-                text_char = encrypted_text[pos]
-                # XOR the character codes
-                decrypted_char = chr(ord(text_char) ^ ord(key_char))
-                result.append(decrypted_char)
+                key_char = key_codes[pos % key_len]
+                result.append(chr(text_codes[pos] ^ key_char))
                 
-            logger.debug("Decryption completed. Key length: %d, Text length: %d", 
-                        key_len, text_len)
-                    
             return ''.join(result)
             
         except Exception as e:
-            logger.error("Error during decryption: %s", e)
-            return ''
+            logger.error("Error decrypting chapter text: %s", e)
+            return ""
 
     def extract_tags(self, soup):
         """Extract and deduplicate tags from various sources on the page"""
-        tags = set()  # Используем set для автоматического удаления дубликатов
+        tags = []
         
         # Extract genres
         genres_div = soup.find('div', {'class': 'book-genres'})
         if genres_div:
             for genre in genres_div.find_all('a'):
-                tag_text = genre.get_text().strip().lower()  # Приводим к нижнему регистру для лучшего сравнения
-                if tag_text:
-                    tags.add(tag_text)
+                tag_text = genre.get_text().strip()
+                if tag_text and tag_text not in tags:
+                    tags.append(tag_text)
 
         # Extract tags from spans with 'tags' class
         tags_spans = soup.find_all('span', {'class': 'tags'})
         for span in tags_spans:
             for tag in span.find_all('a'):
-                tag_text = tag.get_text().strip().lower()
-                if tag_text:
-                    tags.add(tag_text)
+                tag_text = tag.get_text().strip()
+                if tag_text and tag_text not in tags:
+                    tags.append(tag_text)
 
         # Extract additional tags using various selectors
         additional_selectors = [
@@ -383,12 +342,12 @@ class AuthorTodayAdapter(BaseSiteAdapter):
         
         for selector in additional_selectors:
             for element in soup.select(selector):
-                tag_text = element.get_text().strip().lower()
-                if tag_text and not any(skip in tag_text for skip in ['глав', 'страниц', 'знак']):
-                    tags.add(tag_text)
+                tag_text = element.get_text().strip()
+                if tag_text and not any(skip in tag_text.lower() for skip in ['глав', 'страниц', 'знак']):
+                    if tag_text not in tags:
+                        tags.append(tag_text)
 
-        # Преобразуем set обратно в список и сортируем для стабильного порядка
-        return sorted(list(tags))
+        return tags
 
     def extractChapterUrlsAndMetadata(self):
         url = self.url
@@ -398,7 +357,7 @@ class AuthorTodayAdapter(BaseSiteAdapter):
         soup = self.make_soup(data)
 
         # Check if story exists
-        if "Произведене не найдено" in data:
+        if "Произведение не найдено" in data:
             raise exceptions.StoryDoesNotExist(self.url)
 
         # Check for adult content
@@ -495,28 +454,19 @@ class AuthorTodayAdapter(BaseSiteAdapter):
         # Extract and set tags
         tags = self.extract_tags(soup)
         if tags:
-            # Создаем словарь для отслеживания уже добавленных тегов
-            added_tags = {}
-            
-            # Set tags as tags first
+            # Set tags as genre
             for tag in tags:
-                if tag not in added_tags.get('tags', set()):
-                    self.story.addToList('tags', tag)
-                    added_tags.setdefault('tags', set()).add(tag)
-                    
-            # Then set as genre
+                self.story.addToList('genre', tag)
+                
+            # Set tags as tags
             for tag in tags:
-                if tag not in added_tags.get('genre', set()):
-                    self.story.addToList('genre', tag)
-                    added_tags.setdefault('genre', set()).add(tag)
-                    
+                self.story.addToList('tags', tag)
+                
             # Also set as subject tags
             for tag in tags:
-                if tag not in added_tags.get('subject', set()):
-                    self.story.addToList('subject', tag)
-                    added_tags.setdefault('subject', set()).add(tag)
+                self.story.addToList('subject', tag)
 
-            logger.debug(f"Added unique tags: {', '.join(tags)}")
+            logger.debug(f"Added tags: {', '.join(tags)}")
             
         # Log current metadata for debugging
         logger.debug(f"Current genres: {self.story.getList('genre')}")
@@ -618,44 +568,71 @@ class AuthorTodayAdapter(BaseSiteAdapter):
     def getChapterText(self, url):
         logger.debug('Getting chapter text from: %s' % url)
         
-        # Extract chapter ID from URL
-        chapter_id = re.search(r'/reader/\d+/(\d+)', url)
-        if not chapter_id:
-            logger.error('Could not find chapter ID in URL: %s', url)
-            return ""
+        # Extract work_id and chapter_id from URL
+        match = re.match(r'.*?/reader/(\d+)/(\d+)', url)
+        if not match:
+            # Try alternate URL pattern
+            match = re.match(r'.*?/work/(\d+)(?:/chapter/(\d+))?', url)
+            if not match:
+                logger.error('Failed to extract IDs from chapter URL')
+                return ""
+                
+        work_id = match.group(1)
+        chapter_id = match.group(2) if match.group(2) else "1"  # Default to first chapter
         
-        # Construct API URL for chapter content
-        work_id = self.story.getMetadata('storyId')
-        api_url = f'https://{self.getSiteDomain()}/reader/{work_id}/chapter?id={chapter_id.group(1)}&_={int(time.time()*1000)}'
+        # First, get the reader page to obtain necessary tokens
+        reader_url = f'https://{self.getSiteDomain()}/reader/{work_id}'
         
         try:
             # Ensure we're logged in
             if not self._logged_in:
                 self.performLogin(url, None)
             
-            # Add additional headers
-            headers = {
-                'Accept': 'application/json',
-                'X-Requested-With': 'XMLHttpRequest',
-                'User-Agent': self.getConfig('user_agent'),
-                'Referer': f'https://{self.getSiteDomain()}/reader/{work_id}'
-            }
-            
-            # Now get the chapter content
-            response = self.session.get(api_url, headers=headers)
+            # Get reader page first
+            response = self.session.get(reader_url)
             response.raise_for_status()
             
-            # Get reader-secret from response headers (case-insensitive)
+            # Extract reader-secret from page
             reader_secret = None
-            for header_name, header_value in response.headers.items():
-                if header_name.lower() == 'reader-secret':
-                    reader_secret = header_value
-                    break
-                
-            if not reader_secret:
-                logger.error('Could not find reader-secret in response headers')
-                return ""
             
+            # Try multiple patterns for reader secret
+            secret_patterns = [
+                r'readerSecret\s*=\s*[\'"]([^\'"]+)[\'"]',
+                r'data-reader-secret=[\'"]([^\'"]+)[\'"]',
+                r'"readerSecret"\s*:\s*[\'"]([^\'"]+)[\'"]'
+            ]
+            
+            for pattern in secret_patterns:
+                match = re.search(pattern, response.text)
+                if match:
+                    reader_secret = match.group(1)
+                    logger.debug("Found reader secret using pattern: %s" % pattern)
+                    break
+            
+            # Set required headers
+            headers = {
+                'Accept': 'application/json, text/javascript, */*; q=0.01',
+                'X-Requested-With': 'XMLHttpRequest',
+                'Referer': reader_url,
+                'Origin': 'https://' + self.getSiteDomain(),
+                'Sec-Fetch-Site': 'same-origin',
+                'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Dest': 'empty'
+            }
+            
+            if reader_secret:
+                headers['Reader-Secret'] = reader_secret
+            
+            # Add headers to session
+            self.session.headers.update(headers)
+            
+            # API endpoint for chapter content with timestamp
+            api_url = f'https://{self.getSiteDomain()}/reader/{work_id}/chapter?id={chapter_id}&_={int(time.time()*1000)}'
+            
+            # Get chapter content
+            response = self.session.get(api_url)
+            response.raise_for_status()
+
             try:
                 json_data = response.json()
             except json.JSONDecodeError as e:
@@ -664,75 +641,41 @@ class AuthorTodayAdapter(BaseSiteAdapter):
             
             if not json_data.get('isSuccessful'):
                 error_msg = json_data.get('message', 'Unknown error')
-                logger.error('Server returned unsuccessful response: %s' % error_msg)
+                logger.error('Server returned unsuccessful response for chapter: %s' % error_msg)
                 return ""
             
-            # Get encrypted text from data field
-            if not json_data.get('data') or not isinstance(json_data['data'], dict):
-                logger.error('Invalid data structure in response')
+            # Look for reader-secret in various places
+            if not reader_secret:
+                # Try headers first
+                for header_name in ['Reader-Secret', 'reader-secret', 'X-Reader-Secret', 'x-reader-secret']:
+                    if header_name.lower() in response.headers:
+                        reader_secret = response.headers[header_name]
+                        break
+                
+                # Then try response data
+                if not reader_secret and 'readerSecret' in json_data:
+                    reader_secret = json_data['readerSecret']
+                
+                # Finally try data.readerSecret
+                if not reader_secret and 'data' in json_data and 'readerSecret' in json_data['data']:
+                    reader_secret = json_data['data']['readerSecret']
+            
+            if not reader_secret:
+                logger.error('Could not find reader-secret in any location')
                 return ""
             
-            # Create data structure expected by decrypt_chapter_text
-            chapter_data = {'text': json_data['data']['text']}
+            # Get the actual text content
+            if 'data' not in json_data or 'text' not in json_data['data']:
+                logger.error('No text content found in response')
+                return ""
             
             # Decrypt chapter content
-            decrypted_text = self.decrypt_chapter_text(chapter_data, reader_secret)
+            decrypted_text = self.decrypt_chapter_text(json_data['data']['text'], reader_secret)
             if not decrypted_text:
-                logger.error('Failed to decrypt chapter text')
                 return ""
             
             # Parse the decrypted HTML
             chapter_soup = self.make_soup(decrypted_text)
-            
-            # Если включена загрузка изображений
-            if self.getConfig('include_images', True):
-                logger.debug("Starting image processing...")
-                images = chapter_soup.find_all('img')
-                if images:
-                    logger.debug(f"Found {len(images)} images in chapter")
-                    
-                    # Обработаем каждое изображение
-                    for img in images:
-                        # Получаем URL изображения
-                        img_url = img['src']
-                        if not img_url.startswith('http'):
-                            img_url = 'https://' + self.getSiteDomain() + img_url
-                        
-                        try:
-                            # Создаем div для центрирования
-                            div = chapter_soup.new_tag('div')
-                            div['style'] = 'text-align: center; margin: 1em 0;'
-                            
-                            # Создаем новый тег img
-                            new_img = chapter_soup.new_tag('img')
-                            
-                            # Генерируем имя файла для изображения
-                            img_filename = re.sub(r'[^\w\-_.]', '_', img_url.split('/')[-1])
-                            if not img_filename.lower().endswith(('.jpg', '.jpeg', '.png', '.gif')):
-                                img_filename += '.jpg'
-                            
-                            # Устанавливаем атрибуты изображения
-                            new_img['src'] = img_filename
-                            new_img['style'] = 'max-width: 100%; height: auto;'
-                            new_img['alt'] = img.get('alt', '')
-                            
-                            # Добавляем изображение в div
-                            div.append(new_img)
-                            
-                            # Заменяем старый тег img на новый div
-                            img.replace_with(div)
-                            
-                            # Добавляем изображение в очередь загрузки
-                            self.story.addImgUrl(url, img_url, True, img_filename)
-                            
-                            logger.debug(f"Added image to download queue: {img_url} -> {img_filename}")
-                        except Exception as e:
-                            logger.error(f"Error processing image {img_url}: {e}")
-                            img.decompose()
-                    
-                    logger.debug(f"Processed {len(images)} images")
-                else:
-                    logger.debug("No images found in chapter")
             
             # Remove any unwanted elements
             for div in chapter_soup.find_all('div', {'class': ['banner', 'adv', 'ads', 'advertisement']}):
@@ -740,137 +683,57 @@ class AuthorTodayAdapter(BaseSiteAdapter):
             
             # Clean up any empty paragraphs
             for p in chapter_soup.find_all('p'):
-                if not p.get_text(strip=True) and not p.find('img'):
+                if not p.get_text(strip=True):
                     p.decompose()
             
-            # Преобразуем суп обратно в текст с сохранением HTML
-            chapter_text = str(chapter_soup)
-            
-            return chapter_text
+            return self.utf8FromSoup(url, chapter_soup)
             
         except Exception as e:
             logger.error("Error getting chapter text: %s", e)
             return ""
 
-    def download_and_decrypt_chapter(self, chapter_url):
+    def download_image(self, url):
         """
-        Download and decrypt a chapter from the given URL.
+        Загрузить изображение по указанному URL.
         
         Args:
-            chapter_url (str): The URL of the chapter to download.
-            
+            url (str): URL изображения.
+        
         Returns:
-            str: The decrypted chapter text.
+            bytes: Данные изображения или None в случае ошибки.
         """
-        logger.debug('Downloading chapter from: %s' % chapter_url)
-
-        # Ensure we're logged in
-        if not self._logged_in:
-            self.performLogin(chapter_url)
-
-        # Fetch chapter content
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+            'Referer': 'https://' + self.getSiteDomain() + '/',
+            'Origin': 'https://' + self.getSiteDomain(),
+            'Host': urlparse(url).netloc
+}
+        
         try:
-            chapter_content = self.getChapterText(chapter_url)
-            if not chapter_content:
-                logger.error('Failed to fetch chapter content from: %s' % chapter_url)
-                return ''
-
-            # Decrypt the chapter content
-            decrypted_text = self.decrypt_chapter_text(chapter_content, self.user_id)
-            if not decrypted_text:
-                logger.error('Failed to decrypt chapter content from: %s' % chapter_url)
-                return ''
-
-            logger.debug('Successfully downloaded and decrypted chapter from: %s' % chapter_url)
-            return decrypted_text
-
-        except Exception as e:
-            logger.error('Error downloading or decrypting chapter: %s', str(e))
-            return ''
-
-    def download_image(self, url):
-        """Download and optimize a single image"""
-        try:
-            response = requests.get(url)
-            response.raise_for_status()
-            img_data = response.content
-
-            # Use Pillow to process the image
-            if self.has_pil:
-                from PIL import Image
-                import io
-                import tempfile
-                import os
-
-                img = Image.open(io.BytesIO(img_data))
-
-                # Optimize size if too large
-                max_size = (1200, 1800)
-                if img.size[0] > max_size[0] or img.size[1] > max_size[1]:
-                    img.thumbnail(max_size, Image.Resampling.LANCZOS)
-
-                # Save optimized image to temporary file
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.'+img.format.lower() if img.format else '.jpg') as tmp_file:
-                    img.save(tmp_file, format=img.format or 'JPEG', quality=85, optimize=True)
-                    tmp_file_path = tmp_file.name
-
-                # Read optimized image data
-                with open(tmp_file_path, 'rb') as f:
-                    img_data = f.read()
-
-                # Clean up temporary file
-                os.unlink(tmp_file_path)
-
-            return img_data
+            response = requests.get(url, headers=headers)
+            response.raise_for_status()  # Проверка на ошибки HTTP
+            return response.content  # Возвращаем данные изображения
         except requests.RequestException as e:
-            logger.error(f"Error downloading image from {url}: {e}")
+            logger.error(f"Ошибка при загрузке изображения с {url}: {e}")
             return None
 
-    def download_images_concurrently(self, soup):
-        """Download images concurrently and replace src attributes with downloaded content"""
-        try:
-            images = soup.find_all('img')
-            if not images:
-                return
-
-            logger.debug(f"Found {len(images)} images to download")
-
-            # Create thread pool
-            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-                future_to_img = {}
-                
-                # Queue all image downloads
-                for img in images:
-                    if not img.get('src'):
-                        continue
-                        
-                    img_url = img['src']
-                    if not img_url.startswith('http'):
-                        img_url = 'https://' + self.getSiteDomain() + img_url
-                    
-                    logger.debug(f"Queuing image download: {img_url}")
-                    future = executor.submit(self.download_image, img_url)
-                    future_to_img[future] = img
-
-                # Process results as they complete
-                for future in concurrent.futures.as_completed(future_to_img):
-                    img_tag = future_to_img[future]
-                    try:
-                        img_data = future.result()
-                        if img_data:
-                            # Create base64 string from image data
-                            b64_data = base64.b64encode(img_data).decode('utf-8')
-                            img_tag['src'] = f'data:image/jpeg;base64,{b64_data}'
-                            logger.debug(f"Successfully embedded image: {img_tag.get('src')[:50]}...")
-                        else:
-                            logger.warning(f"Failed to download image: {img_tag.get('src')}")
-                            img_tag.decompose()
-                    except Exception as e:
-                        logger.error(f"Error downloading image {img_tag.get('src')}: {e}")
-                        img_tag.decompose()
-
-        except Exception as e:
-            logger.error(f"Error in concurrent image download: {e}")
+    def download_images_concurrently(self, urls):
+        images = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:  # Ограничение на количество потоков
+            future_to_url = {executor.submit(self.download_image, url): url for url in urls}
+            for future in concurrent.futures.as_completed(future_to_url):
+                url = future_to_url[future]
+                try:
+                    data = future.result()
+                    if data:
+                        images[url] = data
+                    else:
+                        logger.warning(f"Не удалось загрузить изображение с {url}")
+                except Exception as e:
+                    logger.error(f"Ошибка при обработке изображения с {url}: {e}")
+        return images
 
     def test_cover_handling(self, cover_url):
         """
@@ -882,61 +745,106 @@ class AuthorTodayAdapter(BaseSiteAdapter):
         import os
         import io
         
-        def get_image_info(image_data):
-            """
-            Helper function to get image info without Pillow.
-            Tries to determine the image format based on magic numbers.
-            Returns a tuple with the image size and format.
-            """
-            image_size = len(image_data)
-            if image_data.startswith(b'\xff\xd8'):
-                image_format = 'JPEG'
-            elif image_data.startswith(b'\x89PNG\r\n\x1a\n'):
-                image_format = 'PNG'
+        def get_image_info(img_data):
+            """Helper to get image info without Pillow"""
+            size = len(img_data)
+            # Basic format detection from magic numbers
+            if img_data.startswith(b'\xff\xd8'):
+                fmt = 'JPEG'
+            elif img_data.startswith(b'\x89PNG\r\n\x1a\n'):
+                fmt = 'PNG'
             else:
-                image_format = 'Unknown'
-            return image_size, image_format
+                fmt = 'Unknown'
+            return size, fmt
         
         results = {'with_pillow': None, 'without_pillow': None}
         
         # Test without Pillow
+        self.has_pil = False
         try:
             response = requests.get(cover_url)
-            image_data = response.content
-            image_size, image_format = get_image_info(image_data)
-            results['without_pillow'] = (image_size, image_format)
+            orig_data = response.content
+            orig_size, orig_format = get_image_info(orig_data)
+            results['without_pillow'] = (orig_size, orig_format)
+            logger.debug(f"Without Pillow - Size: {orig_size} bytes, Format: {orig_format}")
         except Exception as e:
             logger.error(f"Error in without-Pillow test: {e}")
         
         # Test with Pillow
         try:
             from PIL import Image
+            self.has_pil = True
             
             response = requests.get(cover_url)
             img = Image.open(io.BytesIO(response.content))
             
+            # Optimize size if too large
             max_size = (1200, 1800)
             if img.size[0] > max_size[0] or img.size[1] > max_size[1]:
                 img.thumbnail(max_size, Image.Resampling.LANCZOS)
 
-            # Save optimized image to temporary file
+            # Save optimized image to temporary file to measure size
             with tempfile.NamedTemporaryFile(delete=False, suffix='.'+img.format.lower() if img.format else '.jpg') as tmp_file:
                 img.save(tmp_file, format=img.format or 'JPEG', quality=85, optimize=True)
                 tmp_file_path = tmp_file.name
-
+            
+            # Get optimized file size
             opt_size = os.path.getsize(tmp_file_path)
             opt_format = img.format
-            results['with_pillow'] = (opt_size, opt_format)
             
+            # Clean up
+            os.unlink(tmp_file_path)
+            
+            results['with_pillow'] = (opt_size, opt_format)
+            logger.debug(f"With Pillow - Size: {opt_size} bytes, Format: {opt_format}")
+            
+            # Print size reduction percentage if original size is known
             if results['without_pillow']:
                 orig_size = results['without_pillow'][0]
                 reduction = ((orig_size - opt_size) / orig_size) * 100
-                logger.info(f"Size reduction: {reduction:.1f}%")
-            
-            os.unlink(tmp_file_path)
+                logger.debug(f"Size reduction: {reduction:.1f}%")
+                
         except ImportError:
             logger.warning("Pillow not available for testing")
         except Exception as e:
             logger.error(f"Error in Pillow test: {e}")
         
         return results
+
+    def extract_images(self, soup):
+        # Use a set to store unique URLs
+        urls = set()
+        
+        # Find img tags, a tags, and elements with lazy-loaded images
+        for img in soup.find_all(['img', 'a', 'div']):
+            # Check for standard src or href
+            url = img.get('src') or img.get('href')
+            
+            # Check for lazy-loaded images
+            if not url:
+                url = img.get('data-src') or img.get('data-original')
+            
+            # Check for CSS background images
+            if not url and 'style' in img.attrs:
+                style = img.attrs['style']
+                match = re.search(r'url\((.*?)\)', style)
+                if match:
+                    url = match.group(1).strip('\'"')
+            
+            if url and any(url.lower().endswith(ext) for ext in ('.jpg','.jpeg','.png','.gif','.webp')):
+                # Make relative URLs absolute
+                if not url.startswith(('http://', 'https://')):
+                    url = 'https://' + self.getSiteDomain() + ('' if url.startswith('/') else '/') + url
+                
+                # Remove size parameters and convert webp to jpg if possible
+                url = re.sub(r'\?(width|height|size)=\d+', '', url)
+                if url.lower().endswith('.webp'):
+                    url = re.sub(r'\.webp$', '.jpg', url, flags=re.I)
+                    
+                urls.add(url)
+                
+        # Download all found images
+        if urls:
+            downloaded = self.download_images_concurrently(urls)
+            return [img for img in downloaded.values() if img]
+        return []
