@@ -313,10 +313,10 @@ class AuthorTodayAdapter(BaseSiteAdapter):
             return ""
 
     def extract_tags(self, soup):
-        """Extract and deduplicate tags from various sources on the page"""
+        """Извлечь и дедуплицировать теги из различных источников на странице"""
         tags = []
         
-        # Extract genres
+        # Извлечение жанров
         genres_div = soup.find('div', {'class': 'book-genres'})
         if genres_div:
             for genre in genres_div.find_all('a'):
@@ -324,7 +324,7 @@ class AuthorTodayAdapter(BaseSiteAdapter):
                 if tag_text and tag_text not in tags:
                     tags.append(tag_text)
 
-        # Extract tags from spans with 'tags' class
+        # Извлечение тегов из спанов с классом 'tags'
         tags_spans = soup.find_all('span', {'class': 'tags'})
         for span in tags_spans:
             for tag in span.find_all('a'):
@@ -332,7 +332,12 @@ class AuthorTodayAdapter(BaseSiteAdapter):
                 if tag_text and tag_text not in tags:
                     tags.append(tag_text)
 
-        # Extract additional tags using various selectors
+        # Проверка на наличие метки 18+ в блоке book-stats
+        adult_label = soup.select_one('div.book-stats span.label-adult-only')
+        if adult_label:
+            tags.append("18+")  # Добавляем метку 18+ к тегам
+
+        # Извлечение дополнительных тегов с использованием различных селекторов
         additional_selectors = [
             'div.book-tags span',
             'div.book-tags a',
@@ -692,31 +697,69 @@ class AuthorTodayAdapter(BaseSiteAdapter):
             logger.error("Error getting chapter text: %s", e)
             return ""
 
-    def download_image(self, url):
+    def download_image(self, url, headers=None):
         """
-        Загрузить изображение по указанному URL.
+        Загрузить изображение по указанному URL и оптимизировать его, если доступна библиотека Pillow.
         
         Args:
             url (str): URL изображения.
+            headers (dict, optional): Заголовки для запроса.
         
         Returns:
             bytes: Данные изображения или None в случае ошибки.
         """
-        
+        try:
+            response = requests.get(url, headers=headers)
+            response.raise_for_status()
+            img_data = response.content
+
+            # Use Pillow to process the image
+            if self.has_pil:
+                from PIL import Image
+                import io
+                import tempfile
+                import os
+
+                img = Image.open(io.BytesIO(img_data))
+
+                # Optimize size if too large
+                max_size = (1200, 1800)
+                if img.size[0] > max_size[0] or img.size[1] > max_size[1]:
+                    img.thumbnail(max_size, Image.Resampling.LANCZOS)
+
+                # Save optimized image to temporary file
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.'+img.format.lower() if img.format else '.jpg') as tmp_file:
+                    img.save(tmp_file, format=img.format or 'JPEG', quality=85, optimize=True)
+                    tmp_file_path = tmp_file.name
+
+                # Read optimized image data
+                with open(tmp_file_path, 'rb') as f:
+                    img_data = f.read()
+
+                # Clean up the temporary file
+                os.unlink(tmp_file_path)
+
+            return img_data
+        except requests.RequestException as e:
+            logger.error(f"Error downloading image from {url}: {e}")
+            return None
+    
+    def _basic_download_image(self, url):
+        """Basic image download without Pillow processing"""
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
             'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
             'Referer': 'https://' + self.getSiteDomain() + '/',
             'Origin': 'https://' + self.getSiteDomain(),
             'Host': urlparse(url).netloc
-}
+        }
         
         try:
-            response = requests.get(url, headers=headers)
-            response.raise_for_status()  # Проверка на ошибки HTTP
-            return response.content  # Возвращаем данные изображения
-        except requests.RequestException as e:
-            logger.error(f"Ошибка при загрузке изображения с {url}: {e}")
+            response = self.session.get(url, headers=headers)
+            response.raise_for_status()
+            return response.content
+        except Exception as e:
+            logger.error(f"Error downloading image from {url}: {e}")
             return None
 
     def download_images_concurrently(self, urls):
@@ -732,7 +775,7 @@ class AuthorTodayAdapter(BaseSiteAdapter):
                     else:
                         logger.warning(f"Не удалось загрузить изображение с {url}")
                 except Exception as e:
-                    logger.error(f"Ошибка при обработке изображения с {url}: {e}")
+                    logger.error(f"Ошибка при обработке зображеня с {url}: {e}")
         return images
 
     def test_cover_handling(self, cover_url):
@@ -760,7 +803,7 @@ class AuthorTodayAdapter(BaseSiteAdapter):
         results = {'with_pillow': None, 'without_pillow': None}
         
         # Test without Pillow
-        self.has_pil = False
+        self.has_pil = True
         try:
             response = requests.get(cover_url)
             orig_data = response.content
@@ -812,39 +855,49 @@ class AuthorTodayAdapter(BaseSiteAdapter):
         return results
 
     def extract_images(self, soup):
-        # Use a set to store unique URLs
-        urls = set()
+        """
+        Извлечь изображения из HTML-документа.
         
-        # Find img tags, a tags, and elements with lazy-loaded images
-        for img in soup.find_all(['img', 'a', 'div']):
-            # Check for standard src or href
-            url = img.get('src') or img.get('href')
-            
-            # Check for lazy-loaded images
-            if not url:
-                url = img.get('data-src') or img.get('data-original')
-            
-            # Check for CSS background images
-            if not url and 'style' in img.attrs:
-                style = img.attrs['style']
-                match = re.search(r'url\((.*?)\)', style)
-                if match:
-                    url = match.group(1).strip('\'"')
-            
-            if url and any(url.lower().endswith(ext) for ext in ('.jpg','.jpeg','.png','.gif','.webp')):
-                # Make relative URLs absolute
-                if not url.startswith(('http://', 'https://')):
-                    url = 'https://' + self.getSiteDomain() + ('' if url.startswith('/') else '/') + url
-                
-                # Remove size parameters and convert webp to jpg if possible
-                url = re.sub(r'\?(width|height|size)=\d+', '', url)
-                if url.lower().endswith('.webp'):
-                    url = re.sub(r'\.webp$', '.jpg', url, flags=re.I)
-                    
-                urls.add(url)
-                
-        # Download all found images
-        if urls:
-            downloaded = self.download_images_concurrently(urls)
-            return [img for img in downloaded.values() if img]
-        return []
+        Args:
+            soup (BeautifulSoup): Объект BeautifulSoup, представляющий HTML-документ.
+        
+        Returns:
+            list: Список загруженных изображений в виде байтов.
+        """
+        images = []
+        
+        # Заголовки для загрузки изображений
+        headers = {
+            'Accept': 'image/jxl,image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
+        }
+        
+        # Поиск изображений в тегах <figure>
+        for figure in soup.select("figure"):
+            link = figure.find("a")
+            if link and link.get("href"):
+                image_url = link["href"]
+                img_data = self.download_image(image_url, headers=headers)
+                if img_data:
+                    images.append(img_data)
+
+        # Поиск изображений в тегах <img> с классом fr-dib
+        for img in soup.select("img.fr-dib"):
+            image_url = img.get("src")
+            if image_url:
+                img_data = self.download_image(image_url, headers=headers)
+                if img_data:
+                    images.append(img_data)
+
+        # Поиск изображений в тегах <p>
+        for p in soup.select("p"):
+            img = p.find("img")
+            if img and img.get("src"):
+                image_url = img["src"]
+                img_data = self.download_image(image_url, headers=headers)
+                if img_data:
+                    images.append(img_data)
+
+        if not images:
+            logger.warning("Изображения не найдены")
+        
+        return images
