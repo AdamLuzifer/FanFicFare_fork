@@ -50,7 +50,7 @@ class AuthorTodayAdapter(BaseSiteAdapter):
         self.username = self.getConfig("username")
         self.password = self.getConfig("password")
         self.is_adult = self.getConfig('is_adult', False)
-        self.user_id = None  # Will be set during login if needed
+        self.user_id = self.getConfig("user_id")  # Will be set during login if needed
         self.session = None  # Session for making requests
         self._logged_in = False  # Track login state
         self._login_attempts = 0  # Track number of login attempts
@@ -136,6 +136,10 @@ class AuthorTodayAdapter(BaseSiteAdapter):
             
         logger.debug("Starting login process... (Attempt %d/3)", self._login_attempts)
 
+        # Проверка наличия user_id
+        if not self.user_id:
+            logger.error("user_id не установлен. Проверьте процесс входа.")
+        
         # Try to use browser cache if enabled and not checked yet
         if self.getConfig('use_browser_cache', False) and not self._browser_cache_checked:
             logger.debug("Attempting to use browser cache for login")
@@ -309,10 +313,10 @@ class AuthorTodayAdapter(BaseSiteAdapter):
             return ""
 
     def extract_tags(self, soup):
-        """Extract and deduplicate tags from various sources on the page"""
+        """Извлечь и дедуплицировать теги из различных источников на странице"""
         tags = []
         
-        # Extract genres
+        # Извлечение жанров
         genres_div = soup.find('div', {'class': 'book-genres'})
         if genres_div:
             for genre in genres_div.find_all('a'):
@@ -320,7 +324,7 @@ class AuthorTodayAdapter(BaseSiteAdapter):
                 if tag_text and tag_text not in tags:
                     tags.append(tag_text)
 
-        # Extract tags from spans with 'tags' class
+        # Извлечение тегов из спанов с классом 'tags'
         tags_spans = soup.find_all('span', {'class': 'tags'})
         for span in tags_spans:
             for tag in span.find_all('a'):
@@ -328,7 +332,12 @@ class AuthorTodayAdapter(BaseSiteAdapter):
                 if tag_text and tag_text not in tags:
                     tags.append(tag_text)
 
-        # Extract additional tags using various selectors
+        # Проверка на наличие метки 18+ в блоке book-stats
+        adult_label = soup.select_one('div.book-stats span.label-adult-only')
+        if adult_label:
+            tags.append("18+")  # Добавляем метку 18+ к тегам
+
+        # Извлечение дополнительных тегов с использованием различных селекторов
         additional_selectors = [
             'div.book-tags span',
             'div.book-tags a',
@@ -682,15 +691,30 @@ class AuthorTodayAdapter(BaseSiteAdapter):
                 if not p.get_text(strip=True):
                     p.decompose()
             
+            extract_images = self.getConfig('extract_images', False)
+            if not extract_images:
+                for img in chapter_soup.find_all('img'):
+                    img.decompose()
+                    
             return self.utf8FromSoup(url, chapter_soup)
             
         except Exception as e:
             logger.error("Error getting chapter text: %s", e)
             return ""
 
-    def download_image(self, url):
+    def download_image(self, url, headers=None):
+        """
+        Загрузить изображение по указанному URL и оптимизировать его, если доступна библиотека Pillow.
+        
+        Args:
+            url (str): URL изображения.
+            headers (dict, optional): Заголовки для запроса.
+        
+        Returns:
+            bytes: Данные изображения или None в случае ошибки.
+        """
         try:
-            response = requests.get(url)
+            response = requests.get(url, headers=headers)
             response.raise_for_status()
             img_data = response.content
 
@@ -724,10 +748,28 @@ class AuthorTodayAdapter(BaseSiteAdapter):
         except requests.RequestException as e:
             logger.error(f"Error downloading image from {url}: {e}")
             return None
+    
+    def _basic_download_image(self, url):
+        """Basic image download without Pillow processing"""
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+            'Referer': 'https://' + self.getSiteDomain() + '/',
+            'Origin': 'https://' + self.getSiteDomain(),
+            'Host': urlparse(url).netloc
+        }
+        
+        try:
+            response = self.session.get(url, headers=headers)
+            response.raise_for_status()
+            return response.content
+        except Exception as e:
+            logger.error(f"Error downloading image from {url}: {e}")
+            return None
 
     def download_images_concurrently(self, urls):
         images = {}
-        with concurrent.futures.ThreadPoolExecutor() as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:  # Ограничение на количество потоков
             future_to_url = {executor.submit(self.download_image, url): url for url in urls}
             for future in concurrent.futures.as_completed(future_to_url):
                 url = future_to_url[future]
@@ -735,8 +777,10 @@ class AuthorTodayAdapter(BaseSiteAdapter):
                     data = future.result()
                     if data:
                         images[url] = data
+                    else:
+                        logger.warning(f"Не удалось загрузить изображение с {url}")
                 except Exception as e:
-                    logger.error(f"Error processing image from {url}: {e}")
+                    logger.error(f"Ошибка при обработке зображеня с {url}: {e}")
         return images
 
     def test_cover_handling(self, cover_url):
@@ -764,7 +808,7 @@ class AuthorTodayAdapter(BaseSiteAdapter):
         results = {'with_pillow': None, 'without_pillow': None}
         
         # Test without Pillow
-        self.has_pil = False
+        self.has_pil = True
         try:
             response = requests.get(cover_url)
             orig_data = response.content
@@ -814,3 +858,51 @@ class AuthorTodayAdapter(BaseSiteAdapter):
             logger.error(f"Error in Pillow test: {e}")
         
         return results
+
+    def extract_images(self, soup):
+        """
+        Извлечь изображения из HTML-документа.
+        
+        Args:
+            soup (BeautifulSoup): Объект BeautifulSoup, представляющий HTML-документ.
+        
+        Returns:
+            list: Список загруженных изображений в виде байтов.
+        """
+        images = []
+        
+        # Заголовки для загрузки изображений
+        headers = {
+            'Accept': 'image/jxl,image/jpeg,image/png,image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
+        }
+        
+        # Поиск изображений в тегах <figure>
+        for figure in soup.select("figure"):
+            link = figure.find("a")
+            if link and link.get("href"):
+                image_url = link["href"]
+                img_data = self.download_image(image_url, headers=headers)
+                if img_data:
+                    images.append(img_data)
+
+        # Поиск изображений в тегах <img> с классом fr-dib
+        for img in soup.select("img.fr-dib"):
+            image_url = img.get("src")
+            if image_url:
+                img_data = self.download_image(image_url, headers=headers)
+                if img_data:
+                    images.append(img_data)
+
+        # Поиск изображений в тегах <p>
+        for p in soup.select("p"):
+            img = p.find("img")
+            if img and img.get("src"):
+                image_url = img["src"]
+                img_data = self.download_image(image_url, headers=headers)
+                if img_data:
+                    images.append(img_data)
+
+        if not images:
+            logger.warning("Изображения не найдены")
+        
+        return images

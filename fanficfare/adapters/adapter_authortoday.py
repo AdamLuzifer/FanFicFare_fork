@@ -50,11 +50,13 @@ class AuthorTodayAdapter(BaseSiteAdapter):
         self.username = self.getConfig("username")
         self.password = self.getConfig("password")
         self.is_adult = self.getConfig('is_adult', False)
-        self.user_id = self.getConfig("user_id")  # Will be set during login if needed
+        self.user_id = None   # Will be set during login if needed
         self.session = None  # Session for making requests
         self._logged_in = False  # Track login state
         self._login_attempts = 0  # Track number of login attempts
         self._browser_cache_checked = False
+        self.bearer_token = None
+        self.token_expires = None
         
         # Initialize session first
         self.session = requests.Session()
@@ -78,11 +80,7 @@ class AuthorTodayAdapter(BaseSiteAdapter):
             self.has_pil = True
         except ImportError:
             self.has_pil = False
-        
-        # Log cache configuration
-        logger.debug("Cache settings - Basic cache: %s, Browser cache: %s" % 
-                    (self.getConfig('use_basic_cache'), 
-                     self.getConfig('use_browser_cache')))
+
         
         # Extract story ID from URL
         m = re.match(self.getSiteURLPattern(), url)
@@ -101,6 +99,20 @@ class AuthorTodayAdapter(BaseSiteAdapter):
         
         # The date format will vary from site to site
         self.dateformat = "%Y-%m-%d"
+        
+        # Добавляем счетчики для всей книги
+        self.total_book_images = 0
+        self.successful_book_downloads = 0
+        self.failed_book_downloads = 0
+        self.chapters_processed = 0
+        # Добавляем счетчик типов изображений
+        self.image_types = {
+            'jpeg': 0,
+            'png': 0,
+            'gif': 0,
+            'webp': 0,
+            'other': 0
+        }
 
     @staticmethod
     def getSiteDomain():
@@ -118,68 +130,55 @@ class AuthorTodayAdapter(BaseSiteAdapter):
 
     def performLogin(self, url, data=None):
         """
-        Perform login to author.today with session persistence.
+        Perform login to author.today using bearer token API approach.
+        First opens login page in WebView for user authentication,
+        then retrieves bearer token using LoginCookie.
         """
         if self._logged_in:
             logger.debug('Already logged in')
             return True
-
+    
         if not self.username:
             raise exceptions.FailedToLogin(url, 'No username set. Please set username in personal.ini')
         if not self.password:
             raise exceptions.FailedToLogin(url, 'No password set. Please set password in personal.ini')
-
+    
         self._login_attempts += 1
         if self._login_attempts > 3:
-            self._login_attempts = 0  # Reset for next time
+            self._login_attempts = 0
             raise exceptions.FailedToLogin(url, "Exceeded maximum login attempts (3)")
             
         logger.debug("Starting login process... (Attempt %d/3)", self._login_attempts)
-
-        # Проверка наличия user_id
-        if not self.user_id:
-            logger.error("user_id не установлен. Проверьте процесс входа.")
-        
-        # Try to use browser cache if enabled and not checked yet
-        if self.getConfig('use_browser_cache', False) and not self._browser_cache_checked:
-            logger.debug("Attempting to use browser cache for login")
-            self._browser_cache_checked = True
-            cached_cookie = self.get_browser_cookie()
-            if cached_cookie:
-                self.session.cookies.update(cached_cookie)
-                # Test if the cached cookie works
-                test_response = self.session.get(f'https://{self.getSiteDomain()}/account')
-                if test_response.status_code == 200 and 'account/logout' in test_response.text:
-                    logger.debug("Successfully logged in using browser cache")
-                    self._logged_in = True
-                    return True
-
-        logger.debug('Will now login to URL (%s) as (%s)', 
-                    f'https://{self.getSiteDomain()}/account/login',
-                    self.username)
-
+    
         try:
-            # Get login page first
+            # Try to use browser cache if enabled and not checked yet
+            if self.getConfig('use_browser_cache', False) and not self._browser_cache_checked:
+                logger.debug("Attempting to use browser cache for login")
+                self._browser_cache_checked = True
+                cached_cookie = self.get_browser_cookie()
+                if cached_cookie:
+                    self.session.cookies.update(cached_cookie)
+    
+            # First step: Get login page and CSRF token
             login_url = f'https://{self.getSiteDomain()}/account/login'
             response = self.session.get(login_url)
             response.raise_for_status()
-
+    
             # Extract CSRF token
             soup = BeautifulSoup(response.text, 'html.parser')
             csrf_input = soup.find('input', {'name': '__RequestVerificationToken'})
             if not csrf_input:
                 raise exceptions.FailedToLogin(url, 'Could not find CSRF token')
             csrf_token = csrf_input.get('value')
-
-            # Prepare login data
+    
+            # Perform login to get LoginCookie
             login_data = {
                 'Login': self.username,
                 'Password': self.password,
                 '__RequestVerificationToken': csrf_token,
                 'RememberMe': 'true'
             }
-
-            # Set headers for login request
+    
             headers = {
                 'Content-Type': 'application/x-www-form-urlencoded',
                 'Origin': f'https://{self.getSiteDomain()}',
@@ -187,50 +186,43 @@ class AuthorTodayAdapter(BaseSiteAdapter):
                 'X-Requested-With': 'XMLHttpRequest',
                 'Accept': 'application/json, text/javascript, */*; q=0.01'
             }
-
-            # Perform login
-            response = self.session.post(login_url, data=login_data, headers=headers, allow_redirects=True)
+    
+            response = self.session.post(login_url, data=login_data, headers=headers)
             response.raise_for_status()
-
-            # Check if response is JSON
+    
+            # Check if we got LoginCookie
+            if not self.getAuthCookie():
+                raise exceptions.FailedToLogin(url, "Login failed - LoginCookie not found")
+    
+            # Now get the bearer token using LoginCookie
+            token_url = f'https://{self.getSiteDomain()}/account/bearer-token'
+            token_response = self.session.get(token_url)
+            token_response.raise_for_status()
+    
             try:
-                json_response = response.json()
-                logger.debug("Login JSON response: %s" % str(json_response))
-                if 'isSuccessful' in json_response and json_response['isSuccessful']:
-                    logger.debug("Login successful via JSON response")
-                    self._logged_in = True
-                    
-                    # Extract user ID for decryption
-                    user_id_match = re.search(r'userId\s*=\s*(\d+)', response.text)
-                    if user_id_match:
-                        self.user_id = user_id_match.group(1)
-                        logger.debug(f"Extracted user ID: {self.user_id}")
-                    
-                    return True
-                    
-                error_msg = json_response.get('messages', ['Unknown error'])[0]
-                logger.error(f"Login failed: {error_msg}")
-                if "Страница устарела" in error_msg and self._login_attempts < 3:
-                    logger.warning("Page expired, clearing session and retrying...")
-                    self.session.cookies.clear()  # Clear cookies for fresh attempt
-                    return self.performLogin(url, data)  # Try again with fresh session
-                self._logged_in = False
-                self._login_attempts = 0  # Reset for next time
-                raise exceptions.FailedToLogin(url, error_msg)
-            except ValueError:
-                logger.debug("Response is not JSON, checking cookies...")
-                # Not JSON response, check cookies
-                if self.getAuthCookie():
-                    self._logged_in = True
-                    self._login_attempts = 0  # Reset counter on success
-                    logger.debug("Login successful via cookie check")
-                    return True
-                else:
-                    logger.debug("Current cookies: %s" % str(dict(self.session.cookies)))
-                    self._logged_in = False
-                    self._login_attempts = 0  # Reset for next time
-                    raise exceptions.FailedToLogin(url, "Login failed - authentication cookie not found")
-                    
+                token_data = token_response.json()
+                if 'token' not in token_data:
+                    raise exceptions.FailedToLogin(url, 'Failed to obtain bearer token')
+    
+                # Store the token and update session headers
+                self.bearer_token = token_data['token']
+                self.user_id = str(token_data['userId'])
+                self.token_expires = datetime.strptime(token_data['expires'], "%Y-%m-%dT%H:%M:%SZ")
+    
+                # Update session headers with bearer token
+                self.session.headers.update({
+                    'Authorization': f'Bearer {self.bearer_token}'
+                })
+    
+                self._logged_in = True
+                self._login_attempts = 0
+                logger.debug("Successfully obtained bearer token")
+                return True
+    
+            except (ValueError, KeyError) as e:
+                logger.error(f"Failed to parse token response: {str(e)}")
+                raise exceptions.FailedToLogin(url, f'Failed to parse token response: {str(e)}')
+    
         except Exception as e:
             error_msg = str(e)
             if isinstance(e, requests.exceptions.RequestException):
@@ -244,10 +236,20 @@ class AuthorTodayAdapter(BaseSiteAdapter):
             raise exceptions.FailedToLogin(url, error_msg)
 
     def checkLogin(self, url):
-        """Check if current session is logged in."""
+        """Check if current session is logged in and token is valid."""
+        if not self._logged_in or not self.bearer_token:
+            return False
+            
+        # Check if token has expired
+        if self.token_expires and datetime.utcnow() > self.token_expires:
+            logger.debug("Bearer token has expired")
+            return False
+            
         try:
-            response = self.session.get(url)
-            return 'isLoggedIn = true' in response.text
+            # Try to make a test request to verify token
+            test_url = f'https://{self.getSiteDomain()}/api/v1/profile'
+            response = self.session.get(test_url)
+            return response.status_code == 200
         except:
             return False
             
@@ -263,16 +265,7 @@ class AuthorTodayAdapter(BaseSiteAdapter):
         """Check for presence of auth cookie."""
         try:
             cookies = self.session.cookies
-            cookie_dict = {}
-            # Handle potential duplicate cookies by taking the last value
-            for cookie in cookies:
-                cookie_dict[cookie.name] = cookie.value
-            
-            # Check for either LoginCookie or ngLoginCookie
-            has_login = 'LoginCookie' in cookie_dict
-            has_ng_login = 'ngLoginCookie' in cookie_dict
-            
-            return has_login or has_ng_login
+            return any(cookie.name in ['LoginCookie', 'ngLoginCookie'] for cookie in cookies)
         except:
             return False
 
@@ -289,31 +282,131 @@ class AuthorTodayAdapter(BaseSiteAdapter):
         """
         try:
             if not encrypted_text or not reader_secret:
+                logger.error("Missing encrypted_text or reader_secret")
                 return ''
                 
             # Create decryption key by reversing reader_secret and appending user_id
             key = reader_secret[::-1] + "@_@" + (self.user_id or "")
             key_len = len(key)
             text_len = len(encrypted_text)
-            
+        
+            logger.debug(f"Decrypting text (length: {text_len}) with key (length: {key_len})")
+        
             # Convert text to list of character codes
             text_codes = [ord(c) for c in encrypted_text]
             key_codes = [ord(c) for c in key]
-            
+        
             # Decrypt using XOR with cycling key
             result = []
             for pos in range(text_len):
                 key_char = key_codes[pos % key_len]
                 result.append(chr(text_codes[pos] ^ key_char))
+            
+            decrypted = ''.join(result)
+        
+            # Проверяем, что расшифрованный текст содержит валидный HTML
+            if not ('<' in decrypted and '>' in decrypted):
+                logger.error("Decrypted text does not appear to be valid HTML")
+                logger.debug(f"First 200 chars of decrypted text: {decrypted[:200]}")
+                return ""
+            
+            logger.debug(f"Successfully decrypted {text_len} characters of text")
+            return decrypted
+        
+        except Exception as e:
+            logger.error(f"Error decrypting chapter text: {str(e)}")
+            logger.debug(f"encrypted_text length: {len(encrypted_text) if encrypted_text else 0}")
+            logger.debug(f"reader_secret length: {len(reader_secret) if reader_secret else 0}")
+            return ""
+        
+    def extract_tags(self, soup):
+        """
+        Извлечь теги, используя API author.today.
+        Возвращает список тегов из API, включая метку 18+ если AdultOnly=true.
+        """
+        try:
+            # Attempt to log in if not already logged in
+            if not self._logged_in:
+                self.performLogin(self.url)
+            
+            # Получаем ID книги из URL
+            story_id = self.story.getMetadata('storyId')
+            logger.debug(f"Extracting tags for story ID: {story_id}")
+            
+            # Формируем URL для API запроса
+            api_url = f'https://api.author.today/v1/work/{story_id}/details'
+            
+            # More robust token handling
+            if not self.bearer_token:
+                logger.warning("Bearer token not found. Attempting to retrieve a new token.")
+                try:
+                    # Retry login to get a fresh token
+                    self.performLogin(self._getURL())
+                except Exception as e:
+                    logger.error(f"Failed to obtain bearer token: {e}")
+                    return self._extract_tags_from_html(soup)
+
+            # Делаем запрос к API
+            headers = {
+                'Authorization': f'Bearer {self.bearer_token}'
+            }
+            
+            response = self.session.get(api_url, headers=headers)
+            response.raise_for_status()
+            
+            data = response.json()
+            logger.debug(f"API Response: {data}")  # Добавляем лог ответа API
+            
+            tags = []
+            
+            # Получаем теги из API
+            if 'tags' in data:
+                tags.extend(tag.strip() for tag in data['tags'] if tag.strip())
+                logger.debug(f"Tags from API: {tags}")
+            else:
+                logger.warning("No 'tags' field found in API response")
                 
-            return ''.join(result)
+            # Добав��яем жанры, если они есть
+            if 'genreId' in data and data['genreId']:
+                genre = self._get_genre_name(data['genreId'])
+                if genre:
+                    tags.append(genre)
+                    
+            if 'firstSubGenreId' in data and data['firstSubGenreId']:
+                subgenre = self._get_genre_name(data['firstSubGenreId'])
+                if subgenre:
+                    tags.append(subgenre)
+                    
+            if 'secondSubGenreId' in data and data['secondSubGenreId']:
+                subgenre2 = self._get_genre_name(data['secondSubGenreId'])
+                if subgenre2:
+                    tags.append(subgenre2)
+                    
+            # Добавляем метку 18+ если контент для взрослых
+            if data.get('adultOnly', False):
+                tags.append("18+")
+                
+            # Добавляем дополнительные метки из поля marks, если они есть
+            if 'marks' in data and data['marks']:
+                for mark_id in data['marks']:
+                    mark_name = self._get_mark_name(mark_id)
+                    if mark_name:
+                        tags.append(mark_name)
+                        
+            logger.debug(f"Final tags list: {tags}")
+            
+            if not tags:  # Если теги не найдены через API
+                logger.warning("No tags found via API, falling back to HTML parsing")
+                return self._extract_tags_from_html(soup)
+                
+            return list(dict.fromkeys(tags))  # Удаляем дубликаты, сохраняя порядок
             
         except Exception as e:
-            logger.error("Error decrypting chapter text: %s", e)
-            return ""
+            logger.error(f"Error fetching tags from API: {str(e)}")
+            return self._extract_tags_from_html(soup)
 
-    def extract_tags(self, soup):
-        """Извлечь и дедуплицировать теги из различных источников на странице"""
+    def _extract_tags_from_html(self, soup):
+        """Резервный метод извлечения тегов из HTML при ошибке API"""
         tags = []
         
         # Извлечение жанров
@@ -323,7 +416,7 @@ class AuthorTodayAdapter(BaseSiteAdapter):
                 tag_text = genre.get_text().strip()
                 if tag_text and tag_text not in tags:
                     tags.append(tag_text)
-
+    
         # Извлечение тегов из спанов с классом 'tags'
         tags_spans = soup.find_all('span', {'class': 'tags'})
         for span in tags_spans:
@@ -331,13 +424,13 @@ class AuthorTodayAdapter(BaseSiteAdapter):
                 tag_text = tag.get_text().strip()
                 if tag_text and tag_text not in tags:
                     tags.append(tag_text)
-
-        # Проверка на наличие метки 18+ в блоке book-stats
+    
+        # Проверка на наличие метки 18+
         adult_label = soup.select_one('div.book-stats span.label-adult-only')
         if adult_label:
-            tags.append("18+")  # Добавляем метку 18+ к тегам
-
-        # Извлечение дополнительных тегов с использованием различных селекторов
+            tags.append("18+")
+    
+        # Извлечение дополнительных тегов
         additional_selectors = [
             'div.book-tags span',
             'div.book-tags a',
@@ -351,10 +444,160 @@ class AuthorTodayAdapter(BaseSiteAdapter):
                 if tag_text and not any(skip in tag_text.lower() for skip in ['глав', 'страниц', 'знак']):
                     if tag_text not in tags:
                         tags.append(tag_text)
-
+    
         return tags
 
     def extractChapterUrlsAndMetadata(self):
+        try:
+            # Attempt to log in if not already logged in
+            if not self._logged_in:
+                self.performLogin(self.url)
+
+            # Получаем ID книги из URL
+            story_id = self.story.getMetadata('storyId')
+            
+            # More robust token handling
+            if not self.bearer_token:
+                logger.warning("Bearer token not found. Attempting to retrieve a new token.")
+                try:
+                    # Retry login to get a fresh token
+                    self.performLogin(self.url)
+                except Exception as e:
+                    logger.error(f"Failed to obtain bearer token: {e}")
+                    raise exceptions.StoryDoesNotExist(self.url) from e
+
+            # Формируем URL для API запроса
+            api_url = f'https://api.author.today/v1/work/{story_id}/details'
+            
+            # Делаем запрос к API
+            headers = {
+                'Authorization': f'Bearer {self.bearer_token}'
+            }
+            
+            response = self.session.get(api_url, headers=headers)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            # Проверка на существование произведения
+            if not data or 'id' not in data:
+                raise exceptions.StoryDoesNotExist(self.url)
+                
+            # Проверка на 18+
+            if data.get('adultOnly', False) and not self.is_adult:
+                raise exceptions.AdultCheckRequired(self.url)
+
+            # Установка метаданных из API
+            self.story.setMetadata('title', data.get('title', ''))
+            
+            # Обложка
+            if data.get('coverUrl'):
+                cover_url = data['coverUrl']
+                if not cover_url.startswith('http'):
+                    cover_url = 'https://' + self.getSiteDomain() + cover_url
+                
+                try:
+                    if self.has_pil:
+                        # Оптимизация изображения с PIL
+                        import io
+                        import tempfile
+                        import os
+                        from PIL import Image
+                        
+                        response = self.session.get(cover_url)
+                        img = Image.open(io.BytesIO(response.content))
+                        
+                        # Оптимизация размера
+                        max_size = (1200, 1800)
+                        if img.size[0] > max_size[0] or img.size[1] > max_size[1]:
+                            img.thumbnail(max_size, Image.Resampling.LANCZOS)
+                        
+                        # Сохранение во временный файл
+                        with tempfile.NamedTemporaryFile(delete=False, suffix='.'+img.format.lower() if img.format else '.jpg') as tmp_file:
+                            img.save(tmp_file, format=img.format or 'JPEG', quality=85, optimize=True)
+                            tmp_file_path = tmp_file.name
+                        
+                        # URL для временного файла
+                        tmp_url = 'file:///' + tmp_file_path.replace('\\', '/')
+                        self.setCoverImage(self.url, tmp_url)
+                        
+                        # Очистка временного файла
+                        try:
+                            os.unlink(tmp_file_path)
+                        except:
+                            pass
+                    else:
+                        self.setCoverImage(self.url, cover_url)
+                except Exception as e:
+                    logger.warning(f"Failed to set cover image: {e}")
+
+            # Теги и жанры
+            tags = data.get('tags', [])
+            if data.get('adultOnly', False):
+                tags.append("18+")
+            
+            for tag in tags:
+                self.story.addToList('genre', tag)
+                self.story.addToList('tags', tag)
+                self.story.addToList('subject', tag)
+
+            # Автор
+            self.story.setMetadata('author', data.get('authorFIO', ''))
+            self.story.setMetadata('authorId', str(data.get('authorId', '')))
+            self.story.setMetadata('authorUrl', f'https://{self.getSiteDomain()}/u/{data.get("authorUserName", "")}')
+
+            # Описание
+            self.story.setMetadata('description', stripHTML(data.get('annotation', '')))
+
+            # Статус
+            self.story.setMetadata('status', 'Completed' if data.get('isFinished', False) else 'In-Progress')
+
+            # Количество слов
+            if 'textLength' in data:
+                self.story.setMetadata('numWords', str(data['textLength']))
+
+            # Даты
+            if 'lastUpdateTime' in data:
+                update_date = data['lastUpdateTime'].split('T')[0]
+                self.story.setMetadata('dateUpdated', makeDate(update_date, self.dateformat))
+                
+            if 'lastModificationTime' in data:
+                pub_date = data['lastModificationTime'].split('T')[0]
+                self.story.setMetadata('datePublished', makeDate(pub_date, self.dateformat))
+
+            # Дополнительные метаданные
+            if data.get('seriesTitle'):
+                self.story.setMetadata('series', data['seriesTitle'])
+                if data.get('seriesOrder'):
+                    self.story.setMetadata('seriesIndex', data['seriesOrder'])
+
+            # Получение списка глав через отдельный API-запрос
+            chapters_url = f'https://api.author.today/v1/work/{story_id}/content'
+            chapters_response = self.session.get(chapters_url, headers=headers)
+            chapters_response.raise_for_status()
+            chapters_data = chapters_response.json()
+
+            if not chapters_data:
+                # Если глав нт - одноглавая история
+                self.add_chapter('Chapter 1', self.url)
+                self.story.setMetadata('numChapters', 1)
+                return
+
+            # Добавление глав
+            for chapter in chapters_data:
+                chapter_title = chapter.get('title', '')
+                chapter_url = f'https://{self.getSiteDomain()}/reader/{story_id}/{chapter["id"]}'
+                self.add_chapter(chapter_title, chapter_url)
+
+            self.story.setMetadata('numChapters', len(chapters_data))
+
+        except Exception as e:
+            logger.error(f"Error fetching metadata from API: {str(e)}")
+            # В случае ошибки API, возвращаемся к парсингу HTML
+            return self._extractChapterUrlsAndMetadata_html()
+            
+    def _extractChapterUrlsAndMetadata_html(self):
+        """Резервный метод извлечения метаданных из HTML при ошибке API"""
         url = self.url
         logger.debug("URL: "+url)
 
@@ -571,7 +814,13 @@ class AuthorTodayAdapter(BaseSiteAdapter):
         return response
 
     def getChapterText(self, url):
+        """Get chapter text using Author.Today API"""
         logger.debug('Getting chapter text from: %s' % url)
+        self.chapters_processed += 1
+        
+        # Ensure we're logged in before proceeding
+        if not self._logged_in:
+            self.performLogin(url)
         
         # Extract work_id and chapter_id from URL
         match = re.match(r'.*?/reader/(\d+)/(\d+)', url)
@@ -585,181 +834,222 @@ class AuthorTodayAdapter(BaseSiteAdapter):
         work_id = match.group(1)
         chapter_id = match.group(2) if match.group(2) else "1"  # Default to first chapter
         
-        # First, get the reader page to obtain necessary tokens
-        reader_url = f'https://{self.getSiteDomain()}/reader/{work_id}'
-        
         try:
-            # Ensure we're logged in
-            if not self._logged_in:
-                self.performLogin(url, None)
+            # Ensure we have bearer token
+            if not self.bearer_token:
+                logger.error("No bearer token available")
+                return ""
+    
+            # Формируем URL для API запроса
+            api_url = f'https://api.author.today/v1/work/{work_id}/chapter/{chapter_id}/text'
             
-            # Get reader page first
-            response = self.session.get(reader_url)
-            response.raise_for_status()
-            
-            # Extract reader-secret from page
-            reader_secret = None
-            
-            # Try multiple patterns for reader secret
-            secret_patterns = [
-                r'readerSecret\s*=\s*[\'"]([^\'"]+)[\'"]',
-                r'data-reader-secret=[\'"]([^\'"]+)[\'"]',
-                r'"readerSecret"\s*:\s*[\'"]([^\'"]+)[\'"]'
-            ]
-            
-            for pattern in secret_patterns:
-                match = re.search(pattern, response.text)
-                if match:
-                    reader_secret = match.group(1)
-                    logger.debug("Found reader secret using pattern: %s" % pattern)
-                    break
-            
-            # Set required headers
+            # Set headers with bearer token
             headers = {
-                'Accept': 'application/json, text/javascript, */*; q=0.01',
-                'X-Requested-With': 'XMLHttpRequest',
-                'Referer': reader_url,
+                'Authorization': f'Bearer {self.bearer_token}',
+                'Accept': 'application/json,image/*',
                 'Origin': 'https://' + self.getSiteDomain(),
-                'Sec-Fetch-Site': 'same-origin',
-                'Sec-Fetch-Mode': 'cors',
-                'Sec-Fetch-Dest': 'empty'
+                'Referer': f'https://{self.getSiteDomain()}/reader/{work_id}'
             }
             
-            if reader_secret:
-                headers['Reader-Secret'] = reader_secret
-            
-            # Add headers to session
-            self.session.headers.update(headers)
-            
-            # API endpoint for chapter content with timestamp
-            api_url = f'https://{self.getSiteDomain()}/reader/{work_id}/chapter?id={chapter_id}&_={int(time.time()*1000)}'
-            
             # Get chapter content
-            response = self.session.get(api_url)
+            response = self.session.get(api_url, headers=headers)
             response.raise_for_status()
-
+    
             try:
                 json_data = response.json()
             except json.JSONDecodeError as e:
                 logger.error("Failed to decode JSON response: %s" % e)
                 return ""
             
-            if not json_data.get('isSuccessful'):
-                error_msg = json_data.get('message', 'Unknown error')
-                logger.error('Server returned unsuccessful response for chapter: %s' % error_msg)
-                return ""
-            
-            # Look for reader-secret in various places
-            if not reader_secret:
-                # Try headers first
-                for header_name in ['Reader-Secret', 'reader-secret', 'X-Reader-Secret', 'x-reader-secret']:
-                    if header_name.lower() in response.headers:
-                        reader_secret = response.headers[header_name]
-                        break
-                
-                # Then try response data
-                if not reader_secret and 'readerSecret' in json_data:
-                    reader_secret = json_data['readerSecret']
-                
-                # Finally try data.readerSecret
-                if not reader_secret and 'data' in json_data and 'readerSecret' in json_data['data']:
-                    reader_secret = json_data['data']['readerSecret']
-            
-            if not reader_secret:
-                logger.error('Could not find reader-secret in any location')
-                return ""
-            
-            # Get the actual text content
-            if 'data' not in json_data or 'text' not in json_data['data']:
+            if not json_data or 'text' not in json_data:
                 logger.error('No text content found in response')
                 return ""
             
-            # Decrypt chapter content
-            decrypted_text = self.decrypt_chapter_text(json_data['data']['text'], reader_secret)
+            # Decrypt chapter content using provided key
+            if 'key' not in json_data:
+                logger.error('No decryption key found in response')
+                return ""
+                
+            decrypted_text = self.decrypt_chapter_text(json_data['text'], json_data['key'])
             if not decrypted_text:
                 return ""
+            
+            # Добавляем отладочный вывод HTML
+            logger.debug("Decrypted HTML content:")
+            logger.debug("=" * 80)
+            logger.debug(decrypted_text[:2000])  # Первые 2000 символов
+            logger.debug("=" * 80)
             
             # Parse the decrypted HTML
             chapter_soup = self.make_soup(decrypted_text)
             
-            # Remove any unwanted elements
-            for div in chapter_soup.find_all('div', {'class': ['banner', 'adv', 'ads', 'advertisement']}):
-                div.decompose()
+            # Инициализация счетчиков для главы
+            total_images = 0
+            valid_urls = 0
+            download_attempts = 0
+            successful_downloads = 0
+            failed_downloads = 0
+            chapter_image_types = {
+                'jpeg': 0,
+                'png': 0,
+                'gif': 0,
+                'webp': 0,
+                'other': 0
+            }
             
-            # Clean up any empty paragraphs
-            for p in chapter_soup.find_all('p'):
-                if not p.get_text(strip=True):
-                    p.decompose()
+            # Поиск изображений
+            images = chapter_soup.find_all('img')
+            total_images = len(images)
+            self.total_book_images += total_images
+            
+            logger.info(f"\n=== Chapter {self.chapters_processed} Image Processing Statistics ===")
+            logger.info(f"Images found in this chapter: {total_images}")
+            
+            # Обработка изображений
+            if self.getConfig('extract_images', False):
+                logger.debug("Image extraction is enabled")
+                
+                for idx, img in enumerate(images, 1):
+                    if img.get('src'):
+                        img_url = img['src']
+                        valid_urls += 1
+                        logger.debug(f"\nProcessing image {idx}/{total_images}: {img_url}")
+                        
+                        if img_url.startswith("https://cm.author.today/"):
+                            download_attempts += 1
+                            try:
+                                logger.debug(f"Attempting to download image: {img_url}")
+                                img_data = self.download_image(img_url)
+                                
+                                if img_data:
+                                    successful_downloads += 1
+                                    self.successful_book_downloads += 1
+                                    
+                                    # Определение типа изображения по content-type
+                                    content_type = response.headers.get('content-type', '').lower()
+                                    if 'jpeg' in content_type or 'jpg' in content_type:
+                                        image_type = 'jpeg'
+                                    elif 'png' in content_type:
+                                        image_type = 'png'
+                                    elif 'gif' in content_type:
+                                        image_type = 'gif'
+                                    elif 'webp' in content_type:
+                                        image_type = 'webp'
+                                    else:
+                                        image_type = 'other'
+                                    
+                                    # Обновляем счетчики типов
+                                    chapter_image_types[image_type] += 1
+                                    self.image_types[image_type] += 1
+                                    
+                                    logger.debug(f"Successfully downloaded image {idx} (size: {len(img_data)} bytes, type: {image_type})")
+                                else:
+                                    failed_downloads += 1
+                                    self.failed_book_downloads += 1
+                                    logger.warning(f"Failed to download image {idx}")
+                            except Exception as e:
+                                failed_downloads += 1
+                                self.failed_book_downloads += 1
+                                logger.error(f"Error processing image {img_url}: {e}")
+                        else:
+                            logger.debug(f"Skipping non-author.today image URL: {img_url}")
+                    else:
+                        logger.warning(f"Image tag {idx} has no src attribute")
+                
+                # Статистика главы
+                logger.info("\n=== Chapter Image Processing Statistics ===")
+                logger.info(f"Chapter {self.chapters_processed}:")
+                logger.info(f"Images found in chapter: {total_images}")
+                logger.info(f"Valid URLs found: {valid_urls}")
+                logger.info(f"Download attempts: {download_attempts}")
+                logger.info(f"Successfully downloaded: {successful_downloads}")
+                logger.info(f"Failed downloads: {failed_downloads}")
+                if download_attempts > 0:
+                    logger.info(f"Chapter success rate: {(successful_downloads/download_attempts*100):.1f}%")
+                
+                # Статистика типов изображений в главе
+                logger.info("\n=== Chapter Image Types ===")
+                for img_type, count in chapter_image_types.items():
+                    if count > 0:
+                        logger.info(f"{img_type.upper()}: {count}")
+                
+                # Общая статистика книги
+                logger.info("\n=== Overall Book Statistics ===")
+                logger.info(f"Chapters processed: {self.chapters_processed}")
+                logger.info(f"Total images found in book: {self.total_book_images}")
+                logger.info(f"Total successfully downloaded: {self.successful_book_downloads}")
+                logger.info(f"Total failed downloads: {self.failed_book_downloads}")
+                if self.total_book_images > 0:
+                    logger.info(f"Overall success rate: {(self.successful_book_downloads/self.total_book_images*100):.1f}%")
+                
+                # Общая статистика типов изображений
+                logger.info("\n=== Overall Image Types Statistics ===")
+                for img_type, count in self.image_types.items():
+                    if count > 0:
+                        logger.info(f"{img_type.upper()}: {count}")
+                        percentage = (count / self.successful_book_downloads * 100) if self.successful_book_downloads > 0 else 0
+                        logger.info(f"{img_type.upper()} percentage: {percentage:.1f}%")
+                
+                logger.info("=====================================\n")
+            else:
+                logger.debug("Image extraction is disabled in configuration")
             
             return self.utf8FromSoup(url, chapter_soup)
             
         except Exception as e:
             logger.error("Error getting chapter text: %s", e)
             return ""
-
-    def download_image(self, url, headers=None):
-        """
-        Загрузить изображение по указанному URL и оптимизировать его, если доступна библиотека Pillow.
+            
+    def download_image(self, img_url):
+        """Загрузка изображения с расширенным логированием"""
+        logger.debug(f"\n=== Starting image download ===")
+        logger.debug(f"URL: {img_url}")
         
-        Args:
-            url (str): URL изображения.
-            headers (dict, optional): Заголовки для запроса.
-        
-        Returns:
-            bytes: Данные изображения или None в случае ошибки.
-        """
-        try:
-            response = requests.get(url, headers=headers)
-            response.raise_for_status()
-            img_data = response.content
-
-            # Use Pillow to process the image
-            if self.has_pil:
-                from PIL import Image
-                import io
-                import tempfile
-                import os
-
-                img = Image.open(io.BytesIO(img_data))
-
-                # Optimize size if too large
-                max_size = (1200, 1800)
-                if img.size[0] > max_size[0] or img.size[1] > max_size[1]:
-                    img.thumbnail(max_size, Image.Resampling.LANCZOS)
-
-                # Save optimized image to temporary file
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.'+img.format.lower() if img.format else '.jpg') as tmp_file:
-                    img.save(tmp_file, format=img.format or 'JPEG', quality=85, optimize=True)
-                    tmp_file_path = tmp_file.name
-
-                # Read optimized image data
-                with open(tmp_file_path, 'rb') as f:
-                    img_data = f.read()
-
-                # Clean up the temporary file
-                os.unlink(tmp_file_path)
-
-            return img_data
-        except requests.RequestException as e:
-            logger.error(f"Error downloading image from {url}: {e}")
+        # Проверка URL
+        if not img_url or not img_url.startswith("https://cm.author.today/"):
+            logger.error(f"Invalid image URL: {img_url}")
             return None
-    
-    def _basic_download_image(self, url):
-        """Basic image download without Pillow processing"""
+        
+        # Подготовка заголовков
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
-            'Referer': 'https://' + self.getSiteDomain() + '/',
-            'Origin': 'https://' + self.getSiteDomain(),
-            'Host': urlparse(url).netloc
+            'Authorization': f'Bearer {self.bearer_token}' if self.bearer_token else '',
+            'Accept': 'image/*',
+            'User-Agent': 'Mozilla/5.0',
+            'Referer': 'https://' + self.getSiteDomain(),
+            'Origin': 'https://' + self.getSiteDomain()
         }
+        logger.debug(f"Request headers: {json.dumps(headers, indent=2)}")
         
         try:
-            response = self.session.get(url, headers=headers)
+            logger.debug("Sending HTTP request...")
+            response = self.session.get(img_url, headers=headers)
+            
+            logger.debug(f"Response status code: {response.status_code}")
+            logger.debug(f"Response headers: {json.dumps(dict(response.headers), indent=2)}")
+            
             response.raise_for_status()
+            
+            content_length = len(response.content)
+            logger.debug(f"Downloaded content length: {content_length} bytes")
+            
+            if content_length < 100:  # Минимальный размер изображения
+                logger.warning(f"Suspicious image size: {content_length} bytes")
+                return None
+            
+            # Проверка типа контента
+            content_type = response.headers.get('content-type', '')
+            logger.debug(f"Content type: {content_type}")
+            
+            if not any(img_type in content_type.lower() for img_type in ['image/jpeg', 'image/png', 'image/gif', 'image/webp']):
+                logger.warning(f"Unexpected content type: {content_type}")
+                return None
+            
+            logger.debug("Image download successful")
             return response.content
+            
         except Exception as e:
-            logger.error(f"Error downloading image from {url}: {e}")
+            logger.error(f"Error downloading image: {e}")
+            logger.exception("Full traceback:")
             return None
 
     def download_images_concurrently(self, urls):
@@ -779,6 +1069,7 @@ class AuthorTodayAdapter(BaseSiteAdapter):
         return images
 
     def test_cover_handling(self, cover_url):
+
         """
         Test cover image handling with and without Pillow.
         Returns tuple: (with_pillow_size, without_pillow_size, with_pillow_format, without_pillow_format)
@@ -856,48 +1147,128 @@ class AuthorTodayAdapter(BaseSiteAdapter):
 
     def extract_images(self, soup):
         """
-        Извлечь изображения из HTML-документа.
-        
-        Args:
-            soup (BeautifulSoup): Объект BeautifulSoup, представляющий HTML-документ.
-        
-        Returns:
-            list: Список загруженных изображений в виде байтов.
+        Расширенный метод извлечения изображений с подробной диагностикой.
         """
+        # Новые отладочные логи
+        logger.debug(f"Начало extract_images. Домен: {self.getSiteDomain()}")
+        logger.debug(f"Bearer токен существует: {bool(self.bearer_token)}")
+        logger.debug(f"Текущий URL: {self.url}")
+
+        # Проверяем глобальные настройки извлечения изображений
+        extract_images_config = self.getConfig('extract_images', True)
+        logger.info(f"Глобальная настройка extract_images: {extract_images_config}")
+        
+        if not extract_images_config:
+            logger.warning("Извлечение изображений отключено в конфигурации!")
+            return []
+    
         images = []
+        image_sources = []
         
-        # Заголовки для загрузки изображений
+        # Расширенная диагностика HTML
+        html_content = str(soup)
+        logger.debug(f"HTML длина: {len(html_content)} символов")
+        logger.debug(f"Первые 1000 символов HTML:\n{html_content[:1000]}")
+    
+        # Поиск изображений с максимально широким охватом
+        image_selectors = [
+            # Стандартные теги
+            'img', 
+            # Медиа-контейнеры
+            'picture', 'figure', 
+            # Контейнеры с фоновыми изображениями
+            '[style*="background-image"]',
+            # Специфические классы для Author.Today
+            '.story-image', '.content-image', '.post-image'
+        ]
+    
+        # Расширенный поиск изображений
+        for selector in image_selectors:
+            tags = soup.select(selector)
+            logger.debug(f"Найдено тегов по селектору '{selector}': {len(tags)}")
+            
+            for tag in tags:
+                # Извлечение URL из различных атрибутов
+                src_attributes = [
+                    'src', 'data-src', 'data-original', 
+                    'data-image', 'data-url', 
+                    # Для background-image
+                    lambda t: re.search(r'url\([\'"]?([^\'"]+)[\'"]?\)', t.get('style', ''))
+                ]
+    
+                for attr in src_attributes:
+                    if callable(attr):
+                        match = attr(tag)
+                        if match:
+                            src = match.group(1) if hasattr(match, 'group') else match
+                    else:
+                        src = tag.get(attr)
+                    
+                    if src and src not in image_sources:
+                        # Нормализация URL
+                        if not src.startswith('http'):
+                            if src.startswith('//'):
+                                src = 'https:' + src
+                            elif src.startswith('/'):
+                                src = f'https://{self.getSiteDomain()}{src}'
+                            else:
+                                src = f'https://{self.getSiteDomain()}/{src}'
+                        
+                        # Фильтрация и проверка URL
+                        if src.startswith("https://cm.author.today/"):
+                            image_sources.append(src)
+                            logger.debug(f"Найден URL изображения: {src}")
+    
+        # Диагностика найденных источников
+        logger.info(f"Всего найдено уникальных источников изображений: {len(image_sources)}")
+    
+        # Подготовка заголовков
         headers = {
-            'Accept': 'image/jxl,image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
+            'Accept': 'image/jxl,image/jpeg,image/png,image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+            'Referer': f'https://{self.getSiteDomain()}',
+            'User-Agent': self.getConfig('user_agent', 'FanFicFare/4.x'),
         }
-        
-        # Поиск изображений в тегах <figure>
-        for figure in soup.select("figure"):
-            link = figure.find("a")
-            if link and link.get("href"):
-                image_url = link["href"]
-                img_data = self.download_image(image_url, headers=headers)
+
+        # Новый отладочный лог
+        logger.debug(f"Заголовки для загрузки: {headers}")
+
+        # Добавление Bearer токена
+        if self.bearer_token:
+            headers['Authorization'] = f'Bearer {self.bearer_token}'
+            logger.debug("Добавлен Bearer токен для авторизации")
+    
+        # Загрузка изображений с расширенной диагностикой
+        for img_url in image_sources:
+            try:
+                logger.info(f"Попытка загрузки изображения: {img_url}")
+                
+                # Проверка Bearer токена перед загрузкой
+                if not self.bearer_token:
+                    logger.warning("Отсутствует Bearer токен!")
+    
+                img_data = self.download_image(img_url, headers=headers)
+                
                 if img_data:
                     images.append(img_data)
-
-        # Поиск изображений в тегах <img> с классом fr-dib
-        for img in soup.select("img.fr-dib"):
-            image_url = img.get("src")
-            if image_url:
-                img_data = self.download_image(image_url, headers=headers)
-                if img_data:
-                    images.append(img_data)
-
-        # Поиск изображений в тегах <p>
-        for p in soup.select("p"):
-            img = p.find("img")
-            if img and img.get("src"):
-                image_url = img["src"]
-                img_data = self.download_image(image_url, headers=headers)
-                if img_data:
-                    images.append(img_data)
-
-        if not images:
-            logger.warning("Изображения не найдены")
-        
+                    logger.info(f"Успешно загружено изображение: {img_url}, размер: {len(img_data)} байт")
+                    
+                    # Добавление в историю с расширенной обработкой
+                    try:
+                        self.story.addImgUrl(
+                            parenturl=self.url, 
+                            url=img_url, 
+                            cover=False,
+                            fetch=self.get_request_raw
+                        )
+                        logger.debug(f"Изображение добавлено в исто��ию: {img_url}")
+                    except Exception as add_error:
+                        logger.error(f"Ошибка при добавлении изображения {img_url}: {add_error}")
+                else:
+                    logger.warning(f"Не удалось загрузить изображение: {img_url}")
+            
+            except Exception as e:
+                logger.error(f"Критическая ошибка при обработке изображения {img_url}: {e}")
+                logger.exception("Полная трассировка ошибки")
+    
+        logger.info(f"Итого загружено изображений: {len(images)}")
         return images
