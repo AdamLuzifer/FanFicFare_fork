@@ -105,7 +105,7 @@ class AuthorTodayAdapter(BaseSiteAdapter):
         self.successful_book_downloads = 0
         self.failed_book_downloads = 0
         self.chapters_processed = 0
-        # Добавляем счетчик типов изображений
+        # Добавляе�� счетчик типов изображений
         self.image_types = {
             'jpeg': 0,
             'png': 0,
@@ -366,7 +366,7 @@ class AuthorTodayAdapter(BaseSiteAdapter):
             else:
                 logger.warning("No 'tags' field found in API response")
                 
-            # Добав��яем жанры, если они есть
+            # Добавляем жанры, если они есть
             if 'genreId' in data and data['genreId']:
                 genre = self._get_genre_name(data['genreId'])
                 if genre:
@@ -453,9 +453,42 @@ class AuthorTodayAdapter(BaseSiteAdapter):
             if not self._logged_in:
                 self.performLogin(self.url)
 
-            # Получаем ID книги из URL
+            # Получае�� ID книги из URL
             story_id = self.story.getMetadata('storyId')
             
+            # Получаем изображения галереи через основной API запрос
+            if story_id:
+                api_url = f'https://api.author.today/v1/work/{story_id}/details'
+                try:
+                    headers = {
+                        'Authorization': f'Bearer {self.bearer_token}',
+                        'Accept': 'application/json'
+                    }
+                    
+                    response = self.session.get(api_url, headers=headers)
+                    response.raise_for_status()
+                    data = response.json()
+                    
+                    if data.get('galleryImages'):
+                        for img_data in data['galleryImages']:
+                            if 'url' in img_data:
+                                img_url = img_data['url']
+                                caption = img_data.get('caption', '')
+                                
+                                # Добавляем изображение в историю
+                                self.story.addImgUrl(
+                                    parenturl=self.url,
+                                    url=img_url,
+                                    cover=False,
+                                    gallery=True,
+                                    caption=caption,
+                                    fetch=self.get_request_raw
+                                )
+                                logger.debug(f"Added gallery image: {img_url} ({caption})")
+                except Exception as e:
+                    logger.warning(f"Failed to fetch gallery images: {e}")
+                    logger.debug(f"API response: {response.text if 'response' in locals() else 'No response'}")
+
             # More robust token handling
             if not self.bearer_token:
                 logger.warning("Bearer token not found. Attempting to retrieve a new token.")
@@ -583,19 +616,44 @@ class AuthorTodayAdapter(BaseSiteAdapter):
                 self.story.setMetadata('numChapters', 1)
                 return
 
-            # Добавление глав
+            # Получаем список глав
+            chapters = []
             for chapter in chapters_data:
                 chapter_title = chapter.get('title', '')
                 chapter_url = f'https://{self.getSiteDomain()}/reader/{story_id}/{chapter["id"]}'
-                self.add_chapter(chapter_title, chapter_url)
+                chapters.append((chapter_title, chapter_url))
 
-            self.story.setMetadata('numChapters', len(chapters_data))
+            # Добавляем основные главы
+            for title, url in chapters:
+                self.add_chapter(title, url)
 
-        except Exception as e:
-            logger.error(f"Error fetching metadata from API: {str(e)}")
-            # В случае ошибки API, возвращаемся к парсингу HTML
-            return self._extractChapterUrlsAndMetadata_html()
+            # Проверяем наличие изображений в галерее
+            if data.get('galleryImages'):
+                gallery_images = data['galleryImages']
+                if gallery_images:
+                    # Создаем специальную главу для галереи
+                    gallery_chapter_title = "Доп. материалы"
+                    logger.debug(f"Creating gallery chapter with {len(gallery_images)} images")
+                    
+                    # Создаем HTML контент для галереи
+                    gallery_html = self.make_gallery_chapter(gallery_images)
+                    self.chapter_gallery_content = gallery_html
+                    
+                    # Добавляем главу галереи последней
+                    self.add_chapter(gallery_chapter_title, None)
+                    logger.debug("Added gallery chapter")
+
+            # Обновляем количество глав
+            total_chapters = len(chapters) + (1 if data.get('galleryImages') else 0)
+            self.story.setMetadata('numChapters', total_chapters)
+            logger.debug(f"Total chapters: {total_chapters} (including gallery)")
+
+            return
             
+        except Exception as e:
+            logger.error("Error in extractChapterUrlsAndMetadata: %s", e)
+            raise
+
     def _extractChapterUrlsAndMetadata_html(self):
         """Резервный метод извлечения метаданных из HTML при ошибке API"""
         url = self.url
@@ -816,6 +874,12 @@ class AuthorTodayAdapter(BaseSiteAdapter):
     def getChapterText(self, url):
         """Get chapter text using Author.Today API"""
         logger.debug('Getting chapter text from: %s' % url)
+        
+        # Если это глава галереи (url=None)
+        if url is None and hasattr(self, 'chapter_gallery_content'):
+            logger.debug("Returning gallery chapter content")
+            return self.chapter_gallery_content
+        
         self.chapters_processed += 1
         
         # Ensure we're logged in before proceeding
@@ -1147,24 +1211,38 @@ class AuthorTodayAdapter(BaseSiteAdapter):
 
     def extract_images(self, soup):
         """
-        Расширенный метод извлечения изображений с подробной диагностикой.
+        Расширенный метод извлечения изображений с поддержкой галереи
         """
-        # Новые отладочные логи
-        logger.debug(f"Начало extract_images. Домен: {self.getSiteDomain()}")
-        logger.debug(f"Bearer токен существует: {bool(self.bearer_token)}")
-        logger.debug(f"Текущий URL: {self.url}")
-
-        # Проверяем глобальные настройки извлечения изображений
-        extract_images_config = self.getConfig('extract_images', True)
-        logger.info(f"Глобальная настройка extract_images: {extract_images_config}")
-        
-        if not extract_images_config:
-            logger.warning("Извлечение изображений отключено в конфигурации!")
-            return []
-    
         images = []
         image_sources = []
         
+        # Получаем ID книги
+        story_id = self.story.getMetadata('storyId')
+        
+        # Получаем изображения галереи через основной API запрос
+        if story_id:
+            api_url = f'https://api.author.today/v1/work/{story_id}/details'
+            try:
+                headers = {
+                    'Authorization': f'Bearer {self.bearer_token}',
+                    'Accept': 'application/json'
+                }
+                
+                response = self.session.get(api_url, headers=headers)
+                response.raise_for_status()
+                data = response.json()
+                
+                if data.get('galleryImages'):
+                    for img_data in data['galleryImages']:
+                        if 'url' in img_data:
+                            img_url = img_data['url']
+                            if img_url not in image_sources:
+                                image_sources.append(img_url)
+                                logger.debug(f"Found gallery image: {img_url} ({img_data.get('caption', '')})")
+            except Exception as e:
+                logger.warning(f"Failed to fetch gallery images: {e}")
+                logger.debug(f"API response: {response.text if 'response' in locals() else 'No response'}")
+
         # Расширенная диагностика HTML
         html_content = str(soup)
         logger.debug(f"HTML длина: {len(html_content)} символов")
@@ -1176,7 +1254,7 @@ class AuthorTodayAdapter(BaseSiteAdapter):
             'img', 
             # Медиа-контейнеры
             'picture', 'figure', 
-            # Контейнеры с фоновыми изображениями
+            # Контейнер с фоновыми изображениями
             '[style*="background-image"]',
             # Специфические классы для Author.Today
             '.story-image', '.content-image', '.post-image'
@@ -1229,7 +1307,7 @@ class AuthorTodayAdapter(BaseSiteAdapter):
             'User-Agent': self.getConfig('user_agent', 'FanFicFare/4.x'),
         }
 
-        # Новый отладочный лог
+        # Новый отладочный л��г
         logger.debug(f"Заголовки для загрузки: {headers}")
 
         # Добавление Bearer токена
@@ -1260,7 +1338,7 @@ class AuthorTodayAdapter(BaseSiteAdapter):
                             cover=False,
                             fetch=self.get_request_raw
                         )
-                        logger.debug(f"Изображение добавлено в исто��ию: {img_url}")
+                        logger.debug(f"Изображение добавлено в историю: {img_url}")
                     except Exception as add_error:
                         logger.error(f"Ошибка при добавлении изображения {img_url}: {add_error}")
                 else:
@@ -1272,3 +1350,59 @@ class AuthorTodayAdapter(BaseSiteAdapter):
     
         logger.info(f"Итого загружено изображений: {len(images)}")
         return images
+
+    def make_gallery_chapter(self, gallery_images):
+        """Создает HTML-контент для главы с галереей"""
+        html = ['<div class="gallery-chapter">']
+        
+        for idx, img in enumerate(gallery_images, 1):
+            if 'url' in img:
+                img_url = img['url']
+                caption = img.get('caption', '')
+                
+                # Добавляем изображение в историю для загрузки
+                self.story.addImgUrl(
+                    parenturl=self.url,
+                    url=img_url,
+                    cover=False,
+                    fetch=self.get_request_raw
+                )
+                
+                # Создаем HTML с изображением и подписью
+                html.append('<div class="gallery-item">')
+                html.append(f'<img src="{img_url}" alt="{caption}"/>')
+                if caption:
+                    html.append(f'<div class="gallery-caption"><p>{caption}</p></div>')
+                html.append('</div>')
+                
+                logger.debug(f"Added gallery image {idx}/{len(gallery_images)}: {img_url} ({caption})")
+        
+        html.append('</div>')
+        
+        # Добавляем CSS стили для галереи
+        css = """
+        <style>
+            .gallery-chapter {
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                gap: 2em;
+                padding: 1em;
+            }
+            .gallery-item {
+                max-width: 100%;
+                text-align: center;
+            }
+            .gallery-item img {
+                max-width: 100%;
+                height: auto;
+            }
+            .gallery-caption {
+                margin-top: 0.5em;
+                font-style: italic;
+                color: #666;
+            }
+        </style>
+        """
+        
+        return css + '\n'.join(html)
