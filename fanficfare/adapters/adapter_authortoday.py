@@ -304,7 +304,7 @@ class AuthorTodayAdapter(BaseSiteAdapter):
             
             decrypted = ''.join(result)
         
-            # Проверяем, что расшифрованный текст содержит валидный HTML
+            # Проверяем, что расшифрованный текст содер��ит валидный HTML
             if not ('<' in decrypted and '>' in decrypted):
                 logger.error("Decrypted text does not appear to be valid HTML")
                 logger.debug(f"First 200 chars of decrypted text: {decrypted[:200]}")
@@ -453,7 +453,7 @@ class AuthorTodayAdapter(BaseSiteAdapter):
             if not self._logged_in:
                 self.performLogin(self.url)
 
-            # Получае�� ID книги из URL
+            # Получаем ID книги из URL
             story_id = self.story.getMetadata('storyId')
             
             # Получаем изображения галереи через основной API запрос
@@ -1307,7 +1307,7 @@ class AuthorTodayAdapter(BaseSiteAdapter):
             'User-Agent': self.getConfig('user_agent', 'FanFicFare/4.x'),
         }
 
-        # Новый отладочный л��г
+        # Новый отладочный лог
         logger.debug(f"Заголовки для загрузки: {headers}")
 
         # Добавление Bearer токена
@@ -1355,31 +1355,48 @@ class AuthorTodayAdapter(BaseSiteAdapter):
         """Создает HTML-контент для главы с галереей"""
         html = ['<div class="gallery-chapter">']
         
+        def fetch_image(url, referer=None):
+            """Функция для загрузки изображения с поддержкой referer"""
+            return self.download_image(url)
+        
+        # Начальный номер для изображений
+        image_counter = 0
+        
         for idx, img in enumerate(gallery_images, 1):
             if 'url' in img:
                 img_url = img['url']
                 caption = img.get('caption', '')
                 
-                # Добавляем изображение в историю для загрузки
-                self.story.addImgUrl(
-                    parenturl=self.url,
-                    url=img_url,
-                    cover=False,
-                    fetch=self.get_request_raw
-                )
-                
-                # Создаем HTML с изображением и подписью
-                html.append('<div class="gallery-item">')
-                html.append(f'<img src="{img_url}" alt="{caption}"/>')
-                if caption:
-                    html.append(f'<div class="gallery-caption"><p>{caption}</p></div>')
-                html.append('</div>')
-                
-                logger.debug(f"Added gallery image {idx}/{len(gallery_images)}: {img_url} ({caption})")
+                try:
+                    # Генерируем имя файла с использованием счетчика
+                    image_name = f'ffdl-{image_counter}.jpg'
+                    image_counter += 1
+                    
+                    # Добавляем изображение через стандартный механизм
+                    self.story.addImgUrl(
+                        parenturl=self.url,
+                        url=img_url,
+                        cover=False,
+                        fetch=fetch_image
+                    )
+                    
+                    # Создаем HTML с правильным путем к файлу
+                    html.append('<div class="gallery-item">')
+                    html.append(f'<img src="images/{image_name}" alt="{caption}"/>')
+                    if caption:
+                        html.append(f'<div class="gallery-caption"><p>{caption}</p></div>')
+                    html.append('</div>')
+                    
+                    self.successful_book_downloads += 1
+                    logger.debug(f"Successfully added gallery image {idx}/{len(gallery_images)}: {img_url}")
+                    
+                except Exception as e:
+                    self.failed_book_downloads += 1
+                    logger.error(f"Error processing gallery image {img_url}: {e}")
+                    continue
         
         html.append('</div>')
         
-        # Добавляем CSS стили для галереи
         css = """
         <style>
             .gallery-chapter {
