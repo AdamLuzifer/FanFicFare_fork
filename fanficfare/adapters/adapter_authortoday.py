@@ -105,7 +105,7 @@ class AuthorTodayAdapter(BaseSiteAdapter):
         self.successful_book_downloads = 0
         self.failed_book_downloads = 0
         self.chapters_processed = 0
-        # Добавляе�� счетчик типов изображений
+        # Добавляем счетчик типов изображений
         self.image_types = {
             'jpeg': 0,
             'png': 0,
@@ -304,7 +304,7 @@ class AuthorTodayAdapter(BaseSiteAdapter):
             
             decrypted = ''.join(result)
         
-            # Проверяем, что расшифрованный текст содер��ит валидный HTML
+            # Проверяем, что расшифрова��ный текст содержит валидный HTML
             if not ('<' in decrypted and '>' in decrypted):
                 logger.error("Decrypted text does not appear to be valid HTML")
                 logger.debug(f"First 200 chars of decrypted text: {decrypted[:200]}")
@@ -580,7 +580,13 @@ class AuthorTodayAdapter(BaseSiteAdapter):
             self.story.setMetadata('authorUrl', f'https://{self.getSiteDomain()}/u/{data.get("authorUserName", "")}')
 
             # Описание
-            self.story.setMetadata('description', stripHTML(data.get('annotation', '')))
+            annotation = data.get('annotation', '')
+            if annotation:
+                # Создаем soup объект только если есть аннотация
+                soup = self.make_soup(annotation)
+                self.story.setMetadata('description', stripHTML(annotation))
+            else:
+                self.story.setMetadata('description', '')
 
             # Статус
             self.story.setMetadata('status', 'Completed' if data.get('isFinished', False) else 'In-Progress')
@@ -632,7 +638,7 @@ class AuthorTodayAdapter(BaseSiteAdapter):
                 gallery_images = data['galleryImages']
                 if gallery_images:
                     # Создаем специальную главу для галереи
-                    gallery_chapter_title = "Доп. материалы"
+                    gallery_chapter_title = "До��. материалы"
                     logger.debug(f"Creating gallery chapter with {len(gallery_images)} images")
                     
                     # Создаем HTML контент для галереи
