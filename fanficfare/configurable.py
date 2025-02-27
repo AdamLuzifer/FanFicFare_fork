@@ -190,7 +190,7 @@ def get_valid_set_options():
 
     valdict = {'collect_series':(None,None,boollist),
                'include_titlepage':(None,None,boollist),
-               'include_tocpage':(None,None,boollist),
+               'include_tocpage':(None,None,boollist+['always']),
                'is_adult':(None,None,boollist),
                'keep_style_attr':(None,None,boollist),
                'keep_title_attr':(None,None,boollist),
@@ -614,7 +614,8 @@ class Configuration(ConfigParser):
 
     def __init__(self, sections, fileform, lightweight=False,
                  basic_cache=None, browser_cache=None):
-        site = sections[-1] # first section is site DN.
+        self.site = sections[-1] # first section is site DN.
+        logger.debug("config site:%s"%self.site)
         ConfigParser.__init__(self)
 
         self.fetcher = None # the network layer for getting pages the
@@ -637,12 +638,12 @@ class Configuration(ConfigParser):
         for section in sections[:-1]:
             self.addConfigSection(section)
 
-        if site.startswith("www."):
-            sitewith = site
-            sitewithout = site.replace("www.","")
+        if self.site.startswith("www."):
+            sitewith = self.site
+            sitewithout = self.site.replace("www.","")
         else:
-            sitewith = "www."+site
-            sitewithout = site
+            sitewith = "www."+self.site
+            sitewithout = self.site
 
         self.addConfigSection(sitewith)
         self.addConfigSection(sitewithout)
@@ -1088,7 +1089,8 @@ class Configuration(ConfigParser):
                     ## make a data list of decorators to re-apply if
                     ## there are many more.
                     if self.browser_cache is None:
-                        self.browser_cache = BrowserCache(self.getConfig,
+                        self.browser_cache = BrowserCache(self.site,
+                                                          self.getConfig,
                                                           self.getConfigList)
                     fetchers.BrowserCacheDecorator(self.browser_cache).decorate_fetcher(self.fetcher)
                 except Exception as e:
