@@ -23,6 +23,7 @@ import re
 from datetime import datetime
 import urllib.parse
 import urllib.request
+import requests
 
 from ..htmlcleanup import stripHTML
 from .base_adapter import BaseSiteAdapter
@@ -62,10 +63,40 @@ class TLRulateRuAdapter(BaseSiteAdapter):
         data = self.get_request(url)
         soup = self.make_soup(data)
 
-        # Extract title
+        # Выводим HTML для отладки
+        print("Initial HTML content:")
+        print(soup.prettify())
+
+        # Проверяем наличие формы подтверждения возраста
+        age_form = soup.find('div', class_='errorpage')
+        if age_form and "старше 18 лет" in age_form.get_text():
+            print("Found age verification page, submitting confirmation...")
+            
+            # Находим форму и её элементы
+            form = age_form.find('form')
+            if form:
+                # Получаем данные формы
+                data = {
+                    'path': form.find('input', {'name': 'path'})['value'],
+                    'ok': 'Да'
+                }
+                
+                # Отправляем POST-запрос на адрес формы
+                response = self.post_request('https://tl.rulate.ru/mature', data)
+                
+                # После подтверждения возраста делаем новый запрос к странице книги
+                response = self.get_request(self.url)
+                soup = self.make_soup(response)
+            
+        print("Searching for title...")
+        # Пробуем разные селекторы для поиска заголовка
         title = soup.find('h1')
         if not title:
+            print("Title not found in HTML structure!")
+            print("Current HTML structure:")
+            print(soup.prettify())
             raise Exception('Story title not found!')
+            
         self.story.setMetadata('title', title.get_text().strip())
 
         # Extract cover
