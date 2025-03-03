@@ -57,6 +57,11 @@ class TLRulateRuAdapter(BaseSiteAdapter):
         return r'https?://' + re.escape(self.getSiteDomain()) + r'/book/\d+/?$'
 
     def extractChapterUrlsAndMetadata(self):
+        # Проверяем авторизацию перед извлечением данных
+        if not self.is_logged_in():
+            if not self.login():
+                raise Exception("Failed to login to tl.rulate.ru")
+                
         url = self.url
         logger.debug("URL: "+url)
 
@@ -88,13 +93,10 @@ class TLRulateRuAdapter(BaseSiteAdapter):
                 response = self.get_request(self.url)
                 soup = self.make_soup(response)
             
-        print("Searching for title...")
-        # Пробуем разные селекторы для поиска заголовка
+        # Теперь продолжаем поиск заголовка на странице
         title = soup.find('h1')
         if not title:
-            print("Title not found in HTML structure!")
-            print("Current HTML structure:")
-            print(soup.prettify())
+            print("Title not found!")
             raise Exception('Story title not found!')
             
         self.story.setMetadata('title', title.get_text().strip())
@@ -271,3 +273,55 @@ class TLRulateRuAdapter(BaseSiteAdapter):
                 img['src'] = img_url
             
         return self.utf8FromSoup(url, chapter) 
+
+    def login(self):
+        """Login to tl.rulate.ru"""
+        print("Logging in to tl.rulate.ru...")
+        
+        # Получаем страницу с формой логина
+        soup = self.make_soup(self.get_request(self.url))
+        
+        # Находим форму логина
+        login_form = soup.select_one('#header-login form')
+        if not login_form:
+            print("Login form not found!")
+            return False
+            
+        # Получаем action URL из формы
+        form_action = login_form.get('action', '')
+        if not form_action:
+            print("Form action not found!")
+            return False
+            
+        # Получаем поля формы
+        username_field = login_form.select_one('input:nth-child(1)')
+        password_field = login_form.select_one('input:nth-child(2)')
+        submit_button = login_form.select_one('input.btn')
+        
+        if not all([username_field, password_field, submit_button]):
+            print("Login form fields not found!")
+            return False
+            
+        # Формируем данные для POST-запроса
+        login_data = {
+            username_field.get('name', 'username'): self.getConfig('username'),
+            password_field.get('name', 'password'): self.getConfig('password'),
+            submit_button.get('name', 'submit'): submit_button.get('value', 'Войти')
+        }
+        
+        # Отправляем POST-запрос для логина с URL из формы
+        response = self.post_request('https://tl.rulate.ru' + form_action, login_data)
+        
+        # Проверяем успешность логина
+        soup = self.make_soup(response)
+        if soup.select_one('#header-login'):
+            print("Login failed!")
+            return False
+            
+        print("Login successful!")
+        return True
+        
+    def is_logged_in(self):
+        """Check if we're logged in"""
+        soup = self.make_soup(self.get_request(self.url))
+        return not bool(soup.select_one('#header-login'))
