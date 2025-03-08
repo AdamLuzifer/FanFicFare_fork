@@ -167,15 +167,23 @@ class TLRulateRuAdapter(BaseSiteAdapter):
                 self.story.setMetadata('rating', rating)
 
         # Extract genres and tags
-        genres_text = soup.find('strong', text=re.compile(r'Жанры:')).find_next('em').get_text().strip() if soup.find('strong', text=re.compile(r'Жанры:')) else None
-        if genres_text:
-            for genre in genres_text.split():
-                self.story.addToList('genre', genre)
+        print("Extracting genres...")
+        genres = soup.select('#Info > div.row > div.span5 > p:nth-child(12) a.badge')
+        if genres:
+            for genre in genres:
+                if 'genres' in genre['href']:
+                    genre_text = genre.get_text().strip()
+                    print(f"Found genre: {genre_text}")
+                    self.story.addToList('genre', genre_text)
 
-        tags_text = soup.find('strong', text=re.compile(r'Тэги:')).find_next('em').get_text().strip() if soup.find('strong', text=re.compile(r'Тэги:')) else None
-        if tags_text:
-            for tag in tags_text.split():
-                self.story.addToList('tags', tag)
+        print("Extracting tags...")
+        tags = soup.select('#Info > div.row > div.span5 > p:nth-child(13) a.badge')
+        if tags:
+            for tag in tags:
+                if 'tags' in tag['href']:
+                    tag_text = tag.get_text().strip()
+                    print(f"Found tag: {tag_text}")
+                    self.story.addToList('category', tag_text)
 
         # Get chapter list
         chapters = []
