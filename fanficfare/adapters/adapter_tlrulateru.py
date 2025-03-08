@@ -44,6 +44,9 @@ class TLRulateRuAdapter(BaseSiteAdapter):
         
         # normalized story URL.
         self._setURL('https://' + self.getSiteDomain() + '/book/' + self.story.getMetadata('storyId'))
+        
+        # Добавляем переменную для хранения состояния авторизации
+        self._is_logged_in = False
 
     @staticmethod
     def getSiteDomain():
@@ -59,8 +62,13 @@ class TLRulateRuAdapter(BaseSiteAdapter):
     def extractChapterUrlsAndMetadata(self):
         # Проверяем авторизацию перед извлечением данных
         if not self.is_logged_in():
+            print("Не авторизован, пытаемся войти...")
             if not self.login():
                 raise Exception("Failed to login to tl.rulate.ru")
+            else:
+                print("Успешно авторизовались на tl.rulate.ru!")
+        else:
+            print("Уже авторизованы на tl.rulate.ru")
                 
         url = self.url
         logger.debug("URL: "+url)
@@ -69,8 +77,8 @@ class TLRulateRuAdapter(BaseSiteAdapter):
         soup = self.make_soup(data)
 
         # Выводим HTML для отладки
-        print("Initial HTML content:")
-        print(soup.prettify())
+        #print("Initial HTML content:")
+        #print(soup.prettify())
 
         # Проверяем наличие формы подтверждения возраста
         age_form = soup.find('div', class_='errorpage')
@@ -168,22 +176,40 @@ class TLRulateRuAdapter(BaseSiteAdapter):
 
         # Extract genres and tags
         print("Extracting genres...")
-        genres = soup.select('#Info > div.row > div.span5 > p:nth-child(12) a.badge')
-        if genres:
-            for genre in genres:
-                if 'genres' in genre['href']:
+        print("Looking for genres in <p><strong>Жанры:</strong><em>...")
+        genres_p = soup.find('strong', text='Жанры:')
+        if genres_p and genres_p.find_parent('p'):
+            genres_em = genres_p.find_parent('p').find('em')
+            if genres_em:
+                genres = genres_em.find_all('a', class_='badge')
+                print(f"Found {len(genres)} genres:")
+                for genre in genres:
                     genre_text = genre.get_text().strip()
-                    print(f"Found genre: {genre_text}")
+                    genre_href = genre.get('href', '')
+                    print(f"- Genre: '{genre_text}' (href: {genre_href})")
                     self.story.addToList('genre', genre_text)
+            else:
+                print("No <em> tag found for genres")
+        else:
+            print("No genres block found")
 
-        print("Extracting tags...")
-        tags = soup.select('#Info > div.row > div.span5 > p:nth-child(13) a.badge')
-        if tags:
-            for tag in tags:
-                if 'tags' in tag['href']:
+        print("\nExtracting tags...")
+        print("Looking for tags in <p><strong>Тэги:</strong><em>...")
+        tags_p = soup.find('strong', text='Тэги:')
+        if tags_p and tags_p.find_parent('p'):
+            tags_em = tags_p.find_parent('p').find('em')
+            if tags_em:
+                tags = tags_em.find_all('a', class_='badge')
+                print(f"Found {len(tags)} tags:")
+                for tag in tags:
                     tag_text = tag.get_text().strip()
-                    print(f"Found tag: {tag_text}")
+                    tag_href = tag.get('href', '')
+                    print(f"- Tag: '{tag_text}' (href: {tag_href})")
                     self.story.addToList('category', tag_text)
+            else:
+                print("No <em> tag found for tags")
+        else:
+            print("No tags block found")
 
         # Get chapter list
         chapters = []
@@ -284,52 +310,71 @@ class TLRulateRuAdapter(BaseSiteAdapter):
 
     def login(self):
         """Login to tl.rulate.ru"""
-        print("Logging in to tl.rulate.ru...")
+        print("Начинаем процесс авторизации на tl.rulate.ru...")
         
+        # Если уже авторизованы, не делаем повторный логин
+        if self._is_logged_in:
+            print("Уже авторизованы, пропускаем логин")
+            return True
+            
         # Получаем страницу с формой логина
         soup = self.make_soup(self.get_request(self.url))
         
-        # Находим форму логина
+        # Выводим HTML формы для отладки
         login_form = soup.select_one('#header-login form')
-        if not login_form:
-            print("Login form not found!")
-            return False
-            
-        # Получаем action URL из формы
-        form_action = login_form.get('action', '')
-        if not form_action:
-            print("Form action not found!")
-            return False
-            
-        # Получаем поля формы
-        username_field = login_form.select_one('input:nth-child(1)')
-        password_field = login_form.select_one('input:nth-child(2)')
-        submit_button = login_form.select_one('input.btn')
+        if login_form:
+            print("Найдена форма логина:")
+            print(login_form.prettify())
         
-        if not all([username_field, password_field, submit_button]):
-            print("Login form fields not found!")
+        if not login_form:
+            print("Форма логина не найдена!")
             return False
             
-        # Формируем данные для POST-запроса
+        print("Отправляем данные для авторизации...")
+        
+        # Формируем данные как в форме браузера
         login_data = {
-            username_field.get('name', 'username'): self.getConfig('username'),
-            password_field.get('name', 'password'): self.getConfig('password'),
-            submit_button.get('name', 'submit'): submit_button.get('value', 'Войти')
+            'login[login]': self.getConfig('username'),
+            'login[pass]': self.getConfig('password'),
+            'submit': 'Войти'
         }
         
-        # Отправляем POST-запрос для логина с URL из формы
-        response = self.post_request('https://tl.rulate.ru' + form_action, login_data)
+        print(f"Подготовленные данные для отправки (без пароля):")
+        safe_data = login_data.copy()
+        safe_data['login[pass]'] = '****'
+        print(safe_data)
         
-        # Проверяем успешность логина
-        soup = self.make_soup(response)
-        if soup.select_one('#header-login'):
-            print("Login failed!")
-            return False
+        # Отправляем на корневой URL, как в форме
+        login_url = 'https://' + self.getSiteDomain() + '/'
+        print(f"Отправляем запрос на: {login_url}")
+        
+        try:
+            # Отправляем POST-запрос для логина
+            response = self.post_request(login_url, login_data)
             
-        print("Login successful!")
-        return True
+            # Проверяем успешность логина
+            soup = self.make_soup(response)
+            if soup.select_one('#header-login'):
+                print("Ошибка авторизации! Проверьте логин и пароль.")
+                self._is_logged_in = False
+                return False
+                
+            print("Авторизация успешно завершена!")
+            self._is_logged_in = True
+            return True
+            
+        except Exception as e:
+            print(f"Ошибка при авторизации: {str(e)}")
+            self._is_logged_in = False
+            return False
         
     def is_logged_in(self):
         """Check if we're logged in"""
+        # Если уже проверяли - возвращаем сохраненное значение
+        if self._is_logged_in:
+            return True
+            
+        # Иначе проверяем по наличию формы логина
         soup = self.make_soup(self.get_request(self.url))
-        return not bool(soup.select_one('#header-login'))
+        self._is_logged_in = not bool(soup.select_one('#header-login'))
+        return self._is_logged_in
