@@ -45,8 +45,11 @@ class TLRulateRuAdapter(BaseSiteAdapter):
         # normalized story URL.
         self._setURL('https://' + self.getSiteDomain() + '/book/' + self.story.getMetadata('storyId'))
         
-        # Добавляем переменную для хранения состояния авторизации
+        # Добавляем переменные для отладки
         self._is_logged_in = False
+        self._login_attempts = 0
+        self._total_requests = 0
+        self._session = requests.Session()  # Создаем сессию
 
     @staticmethod
     def getSiteDomain():
@@ -308,58 +311,100 @@ class TLRulateRuAdapter(BaseSiteAdapter):
             
         return self.utf8FromSoup(url, chapter) 
 
+    def get_request(self, url, **kwargs):
+        """Перехватываем все запросы для подсчета и используем сессию"""
+        self._total_requests += 1
+        print(f"[DEBUG] Запрос #{self._total_requests} к {url}")
+        print(f"[DEBUG] Текущие куки: {self._session.cookies.get_dict()}")
+        
+        response = self._session.get(url, **kwargs)
+        return response.text  # Возвращаем текст вместо content
+
+    def post_request(self, url, data, **kwargs):
+        """Перехватываем все POST запросы для подсчета и используем сессию"""
+        self._total_requests += 1
+        print(f"[DEBUG] POST запрос #{self._total_requests} к {url}")
+        print(f"[DEBUG] Текущие куки: {self._session.cookies.get_dict()}")
+        
+        response = self._session.post(url, data=data, **kwargs)
+        return response.text  # Возвращаем текст вместо content
+
     def login(self):
         """Login to tl.rulate.ru"""
-        print("Начинаем процесс авторизации на tl.rulate.ru...")
+        self._login_attempts += 1
+        print(f"[DEBUG] Попытка логина #{self._login_attempts}")
         
-        # Если уже авторизованы, не делаем повторный логин
         if self._is_logged_in:
-            print("Уже авторизованы, пропускаем логин")
+            print("[DEBUG] Пропускаем логин - уже авторизованы")
             return True
             
         # Получаем страницу с формой логина
-        soup = self.make_soup(self.get_request(self.url))
+        initial_response = self._session.get(self.url)
+        soup = self.make_soup(initial_response.text)
         
+        # Ищем скрытое поле с CSRF-токеном
+        csrf_meta = soup.find('meta', {'name': 'csrf-token'})
+        if csrf_meta:
+            csrf_token = csrf_meta.get('content')
+            print(f"[DEBUG] CSRF токен из meta: {csrf_token}")
+        else:
+            print("[DEBUG] CSRF токен не найден в meta!")
+            csrf_token = None
+            
         # Выводим HTML формы для отладки
         login_form = soup.select_one('#header-login form')
         if login_form:
             print("Найдена форма логина:")
             print(login_form.prettify())
-        
-        if not login_form:
+        else:
             print("Форма логина не найдена!")
             return False
             
         print("Отправляем данные для авторизации...")
         
-        # Формируем данные как в форме браузера
+        # Формируем данные для отправки
         login_data = {
             'login[login]': self.getConfig('username'),
-            'login[pass]': self.getConfig('password'),
-            'submit': 'Войти'
+            'login[pass]': self.getConfig('password')
         }
         
+        # Добавляем CSRF-токен если нашли
+        if csrf_token:
+            login_data['_csrf'] = csrf_token
+            
         print(f"Подготовленные данные для отправки (без пароля):")
         safe_data = login_data.copy()
         safe_data['login[pass]'] = '****'
         print(safe_data)
         
-        # Отправляем на корневой URL, как в форме
+        # Добавляем заголовки
+        headers = {
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Origin': 'https://' + self.getSiteDomain(),
+            'Referer': self.url,
+            'X-CSRF-Token': csrf_token if csrf_token else '',
+            'X-Requested-With': 'XMLHttpRequest'
+        }
+        
+        # Отправляем на корневой URL
         login_url = 'https://' + self.getSiteDomain() + '/'
         print(f"Отправляем запрос на: {login_url}")
         
         try:
             # Отправляем POST-запрос для логина
-            response = self.post_request(login_url, login_data)
+            response = self._session.post(login_url, data=login_data, headers=headers)
             
             # Проверяем успешность логина
-            soup = self.make_soup(response)
+            soup = self.make_soup(response.text)
             if soup.select_one('#header-login'):
                 print("Ошибка авторизации! Проверьте логин и пароль.")
+                print(f"[DEBUG] Куки после неудачного логина: {self._session.cookies.get_dict()}")
                 self._is_logged_in = False
                 return False
                 
             print("Авторизация успешно завершена!")
+            print(f"[DEBUG] Куки после успешного логина: {self._session.cookies.get_dict()}")
             self._is_logged_in = True
             return True
             
@@ -370,11 +415,13 @@ class TLRulateRuAdapter(BaseSiteAdapter):
         
     def is_logged_in(self):
         """Check if we're logged in"""
-        # Если уже проверяли - возвращаем сохраненное значение
+        print(f"[DEBUG] Проверка авторизации (попыток: {self._login_attempts}, запросов: {self._total_requests})")
+        
         if self._is_logged_in:
+            print("[DEBUG] Используем сохраненное состояние авторизации")
             return True
             
-        # Иначе проверяем по наличию формы логина
         soup = self.make_soup(self.get_request(self.url))
         self._is_logged_in = not bool(soup.select_one('#header-login'))
+        print(f"[DEBUG] Результат проверки авторизации: {'успех' if self._is_logged_in else 'не авторизован'}")
         return self._is_logged_in
