@@ -190,12 +190,18 @@ class FicBookNetAdapter(BaseSiteAdapter):
         dlinfo = soup.select_one('div.d-flex.flex-column.gap-8')
 
         i=0
-        fandoms = dlinfo.select_one('div:not([class])').findAll('a', href=re.compile(r'/fanfiction/\w+'))
-        for fandom in fandoms:
-            self.story.addToList('category',fandom.string)
-            i=i+1
-        if i > 1:
-            self.story.addToList('genre', u'Кроссовер')
+        fandoms_div = dlinfo.select_one('div:not([class])')
+        if fandoms_div is None:
+            # Try alternative selectors if the structure has changed
+            fandoms_div = dlinfo.select_one('div.fandoms-list') or dlinfo
+        
+        if fandoms_div:
+            fandoms = fandoms_div.findAll('a', href=re.compile(r'/fanfiction/\w+'))
+            for fandom in fandoms:
+                self.story.addToList('category',fandom.string)
+                i=i+1
+            if i > 1:
+                self.story.addToList('genre', u'Кроссовер')
 
         tags = soup.find('div',{'class':'tags'})
         if tags:
