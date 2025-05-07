@@ -109,8 +109,22 @@ class TLRulateRuAdapter(BaseSiteAdapter):
         if not title:
             print("Title not found!")
             raise Exception('Story title not found!')
-            
-        self.story.setMetadata('title', title.get_text().strip())
+
+        # Извлекаем основное название (до тега small)
+        main_title = ''.join(title.find_all(string=True, recursive=False)).strip()
+
+        # Извлекаем дополнительное название из тега small, если он есть
+        small_tag = title.find('small')
+        additional_title = small_tag.get_text().strip() if small_tag else None
+
+        # Объединяем названия с разделителем, если есть дополнительное название
+        # Объединяем названия с разделителем, если есть дополнительное название и оно отличается от основного
+        if additional_title and additional_title != main_title:
+            full_title = f"{main_title} / {additional_title}"
+        else:
+            full_title = main_title
+
+        self.story.setMetadata('title', full_title)
 
         # Extract cover
         cover_images = soup.select(".images img")
