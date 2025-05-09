@@ -280,6 +280,10 @@ class AuthorTodayAdapter(BaseSiteAdapter):
         Returns:
             str: The decrypted text, or empty string if decryption fails
         """
+        logger.debug(f"decrypt_chapter_text called:")
+        logger.debug(f"  reader_secret type: {type(reader_secret)}, value: {reader_secret}")
+        logger.debug(f"  encrypted_text type: {type(encrypted_text)}, length: {len(encrypted_text) if encrypted_text else 0}")
+        logger.debug(f"  self.user_id type: {type(self.user_id)}, value: {self.user_id}")
         try:
             if not encrypted_text or not reader_secret:
                 logger.error("Missing encrypted_text or reader_secret")
@@ -910,37 +914,48 @@ class AuthorTodayAdapter(BaseSiteAdapter):
                 logger.error("No bearer token available")
                 return ""
     
-            # Формируем URL для API запроса
-            api_url = f'https://api.author.today/v1/work/{work_id}/chapter/{chapter_id}/text'
-            
-            # Set headers with bearer token
+            # Формируем URL запроса, как в JavaScript скрипте
+            chapter_request_url = f'https://{self.getSiteDomain()}/reader/{work_id}/chapter'
+            params = {
+                'id': chapter_id,
+                '_': int(time.time() * 1000) # Добавляем метку времени в миллисекундах
+            }
+
+            # Set headers similar to JavaScript, including Authorization
             headers = {
                 'Authorization': f'Bearer {self.bearer_token}',
-                'Accept': 'application/json,image/*',
-                'Origin': 'https://' + self.getSiteDomain(),
-                'Referer': f'https://{self.getSiteDomain()}/reader/{work_id}'
+                'Accept': 'application/json, text/javascript, */*; q=0.01',
+                'Origin': f'https://{self.getSiteDomain()}',
+                'Referer': f'https://{self.getSiteDomain()}/reader/{work_id}',
+                'User-Agent': self.session.headers['User-Agent'] # Используем User-Agent из сессии
             }
-            
+
             # Get chapter content
-            response = self.session.get(api_url, headers=headers)
+            response = self.session.get(chapter_request_url, headers=headers, params=params)
             response.raise_for_status()
-    
+
+            # Get reader_secret from headers
+            reader_secret = response.headers.get('reader-secret')
+            if not reader_secret:
+                 logger.error('No reader-secret header found in response from /reader/... endpoint')
+                 return ""
+
             try:
                 json_data = response.json()
             except json.JSONDecodeError as e:
-                logger.error("Failed to decode JSON response: %s" % e)
+                logger.error("Failed to decode JSON response from /reader/... endpoint: %s" % e)
                 return ""
-            
-            if not json_data or 'text' not in json_data:
-                logger.error('No text content found in response')
+
+            # Check if response indicates success and contains text data
+            if not json_data.get('isSuccessful') or not json_data.get('data') or 'text' not in json_data['data']:
+                logger.error('Unsuccessful response or no text content found in response from /reader/... endpoint')
+                # Log messages from response if available
+                if json_data.get('messages'):
+                    logger.error(f"Response messages: {json_data['messages']}")
                 return ""
-            
-            # Decrypt chapter content using provided key
-            if 'key' not in json_data:
-                logger.error('No decryption key found in response')
-                return ""
-                
-            decrypted_text = self.decrypt_chapter_text(json_data['text'], json_data['key'])
+
+            # Decrypt chapter content using reader_secret from headers
+            decrypted_text = self.decrypt_chapter_text(json_data['data']['text'], reader_secret)
             if not decrypted_text:
                 return ""
             
