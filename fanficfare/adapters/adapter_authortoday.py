@@ -642,7 +642,7 @@ class AuthorTodayAdapter(BaseSiteAdapter):
                 gallery_images = data['galleryImages']
                 if gallery_images:
                     # Создаем специальную главу для галереи
-                    gallery_chapter_title = "До��. материалы"
+                    gallery_chapter_title = "Доп. материалы"
                     logger.debug(f"Creating gallery chapter with {len(gallery_images)} images")
                     
                     # Создаем HTML контент для галереи
