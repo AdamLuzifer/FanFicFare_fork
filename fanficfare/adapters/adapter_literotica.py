@@ -236,6 +236,9 @@ class LiteroticaSiteAdapter(BaseSiteAdapter):
             breadcrumbs = soup.find('div', id='BreadCrumbComponent')
             if not breadcrumbs:
                 breadcrumbs = soup.select_one('ul[class^="_breadcrumbs_list_"]')
+            if not breadcrumbs:
+                # _breadcrumbs_18u7l_1
+                breadcrumbs = soup.select_one('nav[class^="_breadcrumbs_"]')
             self.story.addToList('category', breadcrumbs.find_all('a')[1].string)
 
             ## one-shot chapter
@@ -378,6 +381,8 @@ class LiteroticaSiteAdapter(BaseSiteAdapter):
         pages = page_soup.find('div',class_='l_bH')
         if not pages:
             pages = page_soup.select_one('div._pagination_h0sum_1')
+        if not pages:
+            pages = page_soup.select_one('div.clearfix.panel._pagination_1400x_1')
         # logger.debug(pages)
 
         fullhtml = ""
