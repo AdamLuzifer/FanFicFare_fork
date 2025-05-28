@@ -59,7 +59,7 @@ class FicBookNetAdapter(BaseSiteAdapter):
 
         # The date format will vary from site to site.
         # http://docs.python.org/library/datetime.html#strftime-strptime-behavior
-        self.dateformat = "%d %m %Y %H:%M"
+        self.dateformat = "%d %m %Y г., %H:%M"
 
     @staticmethod # must be @staticmethod, don't remove it.
     def getSiteDomain():
