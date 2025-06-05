@@ -427,47 +427,47 @@ class AuthorTodayAdapter(BaseSiteAdapter):
             logger.error(f"Error fetching tags from API: {str(e)}")
             return self._extract_tags_from_html(soup)
 
-    def _extract_tags_from_html(self, soup):
-        """Резервный метод извлечения тегов из HTML при ошибке API"""
-        tags = []
+    # def _extract_tags_from_html(self, soup):
+    #     """Резервный метод извлечения тегов из HTML при ошибке API"""
+    #     tags = []
         
-        # Извлечение жанров
-        genres_div = soup.find('div', {'class': 'book-genres'})
-        if genres_div:
-            for genre in genres_div.find_all('a'):
-                tag_text = genre.get_text().strip()
-                if tag_text and tag_text not in tags:
-                    tags.append(tag_text)
+    #     # Извлечение жанров
+    #     genres_div = soup.find('div', {'class': 'book-genres'})
+    #     if genres_div:
+    #         for genre in genres_div.find_all('a'):
+    #             tag_text = genre.get_text().strip()
+    #             if tag_text and tag_text not in tags:
+    #                 tags.append(tag_text)
     
-        # Извлечение тегов из спанов с классом 'tags'
-        tags_spans = soup.find_all('span', {'class': 'tags'})
-        for span in tags_spans:
-            for tag in span.find_all('a'):
-                tag_text = tag.get_text().strip()
-                if tag_text and tag_text not in tags:
-                    tags.append(tag_text)
+    #     # Извлечение тегов из спанов с классом 'tags'
+    #     tags_spans = soup.find_all('span', {'class': 'tags'})
+    #     for span in tags_spans:
+    #         for tag in span.find_all('a'):
+    #             tag_text = tag.get_text().strip()
+    #             if tag_text and tag_text not in tags:
+    #                 tags.append(tag_text)
     
-        # Проверка на наличие метки 18+
-        adult_label = soup.select_one('div.book-stats span.label-adult-only')
-        if adult_label:
-            tags.append("18+")
+    #     # Проверка на наличие метки 18+
+    #     adult_label = soup.select_one('div.book-stats span.label-adult-only')
+    #     if adult_label:
+    #         tags.append("18+")
     
-        # Извлечение дополнительных тегов
-        additional_selectors = [
-            'div.book-tags span',
-            'div.book-tags a',
-            'div.tags-container a',
-            'div.book-meta-tags a'
-        ]
+    #     # Извлечение дополнительных тегов
+    #     additional_selectors = [
+    #         'div.book-tags span',
+    #         'div.book-tags a',
+    #         'div.tags-container a',
+    #         'div.book-meta-tags a'
+    #     ]
         
-        for selector in additional_selectors:
-            for element in soup.select(selector):
-                tag_text = element.get_text().strip()
-                if tag_text and not any(skip in tag_text.lower() for skip in ['глав', 'страниц', 'знак']):
-                    if tag_text not in tags:
-                        tags.append(tag_text)
+    #     for selector in additional_selectors:
+    #         for element in soup.select(selector):
+    #             tag_text = element.get_text().strip()
+    #             if tag_text and not any(skip in tag_text.lower() for skip in ['глав', 'страниц', 'знак']):
+    #                 if tag_text not in tags:
+    #                     tags.append(tag_text)
     
-        return tags
+    #     return tags
 
     def extractChapterUrlsAndMetadata(self):
         try:
@@ -682,208 +682,208 @@ class AuthorTodayAdapter(BaseSiteAdapter):
             logger.error("Error in extractChapterUrlsAndMetadata: %s", e)
             raise
 
-    def _extractChapterUrlsAndMetadata_html(self):
-        """Резервный метод извлечения метаданных из HTML при ошибке API"""
-        url = self.url
-        logger.debug("URL: "+url)
+    # def _extractChapterUrlsAndMetadata_html(self):
+    #     """Резервный метод извлечения метаданных из HTML при ошибке API"""
+    #     url = self.url
+    #     logger.debug("URL: "+url)
 
-        data = self.get_request(url)
-        soup = self.make_soup(data)
+    #     data = self.get_request(url)
+    #     soup = self.make_soup(data)
 
-        # Check if story exists
-        if "Произведение не найдено" in data:
-            raise exceptions.StoryDoesNotExist(self.url)
+    #     # Check if story exists
+    #     if "Произведение не найдено" in data:
+    #         raise exceptions.StoryDoesNotExist(self.url)
 
-        # Check for adult content
-        if "Произведение имеет метку 18+" in data and not self.is_adult:
-            raise exceptions.AdultCheckRequired(self.url)
+    #     # Check for adult content
+    #     if "Произведение имеет метку 18+" in data and not self.is_adult:
+    #         raise exceptions.AdultCheckRequired(self.url)
 
-        # Extract metadata
-        title = soup.find('h1', {'class': 'book-title'})
-        self.story.setMetadata('title', title.get_text().strip() if title else '')
+    #     # Extract metadata
+    #     title = soup.find('h1', {'class': 'book-title'})
+    #     self.story.setMetadata('title', title.get_text().strip() if title else '')
 
-        # Extract cover image
-        get_cover = True
-        if get_cover:
-            # Try to get cover image similar to FicBook's implementation
-            cover_url = None
+    #     # Extract cover image
+    #     get_cover = True
+    #     if get_cover:
+    #         # Try to get cover image similar to FicBook's implementation
+    #         cover_url = None
             
-            # Try meta tag first (highest quality usually)
-            meta_cover = soup.find('meta', {'property':'og:image'})
-            if meta_cover:
-                cover_url = meta_cover.get('content')
+    #         # Try meta tag first (highest quality usually)
+    #         meta_cover = soup.find('meta', {'property':'og:image'})
+    #         if meta_cover:
+    #             cover_url = meta_cover.get('content')
             
-            # Fallback to direct image elements if meta tag not found
-            if not cover_url:
-                cover_selectors = [
-                    ('img', {'class': 'cover-image'}),
-                    ('img', {'class': 'book-cover-img'}),
-                    ('img', {'class': 'book-cover'}),
-                    ('div.book-cover img', {})
-                ]
+    #         # Fallback to direct image elements if meta tag not found
+    #         if not cover_url:
+    #             cover_selectors = [
+    #                 ('img', {'class': 'cover-image'}),
+    #                 ('img', {'class': 'book-cover-img'}),
+    #                 ('img', {'class': 'book-cover'}),
+    #                 ('div.book-cover img', {})
+    #             ]
                 
-                for tag, attrs in cover_selectors:
-                    if '.' in tag:
-                        # Handle CSS selector style
-                        img = soup.select_one(tag)
-                    else:
-                        img = soup.find(tag, attrs)
-                    if img and img.get('src'):
-                        cover_url = img['src']
-                        break
+    #             for tag, attrs in cover_selectors:
+    #                 if '.' in tag:
+    #                     # Handle CSS selector style
+    #                     img = soup.select_one(tag)
+    #                 else:
+    #                     img = soup.find(tag, attrs)
+    #                 if img and img.get('src'):
+    #                     cover_url = img['src']
+    #                     break
             
-            if cover_url:
-                # Remove size parameters from URL
-                cover_url = re.sub(r'\?(?:width|height|size)=\d+', '', cover_url)
+    #         if cover_url:
+    #             # Remove size parameters from URL
+    #             cover_url = re.sub(r'\?(?:width|height|size)=\d+', '', cover_url)
                 
-                # Ensure absolute URL
-                if not cover_url.startswith('http'):
-                    cover_url = 'https://' + self.getSiteDomain() + cover_url
+    #             # Ensure absolute URL
+    #             if not cover_url.startswith('http'):
+    #                 cover_url = 'https://' + self.getSiteDomain() + cover_url
                 
-                # Run test before actual processing
-                logger.debug("Testing cover image handling...")
-                test_results = self.test_cover_handling(cover_url)
+    #             # Run test before actual processing
+    #             logger.debug("Testing cover image handling...")
+    #             test_results = self.test_cover_handling(cover_url)
                 
-                try:
-                    if self.has_pil:
-                        # Download image and optimize with PIL
-                        import io
-                        import tempfile
-                        import os
-                        from PIL import Image
-                        import requests
+    #             try:
+    #                 if self.has_pil:
+    #                     # Download image and optimize with PIL
+    #                     import io
+    #                     import tempfile
+    #                     import os
+    #                     from PIL import Image
+    #                     import requests
                         
-                        response = requests.get(cover_url)
-                        img = Image.open(io.BytesIO(response.content))
+    #                     response = requests.get(cover_url)
+    #                     img = Image.open(io.BytesIO(response.content))
                         
-                        # Optimize size if too large
-                        max_size = (1200, 1800)  # Maximum dimensions
-                        if img.size[0] > max_size[0] or img.size[1] > max_size[1]:
-                            img.thumbnail(max_size, Image.Resampling.LANCZOS)
+    #                     # Optimize size if too large
+    #                     max_size = (1200, 1800)  # Maximum dimensions
+    #                     if img.size[0] > max_size[0] or img.size[1] > max_size[1]:
+    #                         img.thumbnail(max_size, Image.Resampling.LANCZOS)
                         
-                        # Save optimized image to temporary file
-                        with tempfile.NamedTemporaryFile(delete=False, suffix='.'+img.format.lower() if img.format else '.jpg') as tmp_file:
-                            img.save(tmp_file, format=img.format or 'JPEG', quality=85, optimize=True)
-                            tmp_file_path = tmp_file.name
+    #                     # Save optimized image to temporary file
+    #                     with tempfile.NamedTemporaryFile(delete=False, suffix='.'+img.format.lower() if img.format else '.jpg') as tmp_file:
+    #                         img.save(tmp_file, format=img.format or 'JPEG', quality=85, optimize=True)
+    #                         tmp_file_path = tmp_file.name
                         
-                        # Create a local URL for the temporary file
-                        tmp_url = 'file:///' + tmp_file_path.replace('\\', '/')
+    #                     # Create a local URL for the temporary file
+    #                     tmp_url = 'file:///' + tmp_file_path.replace('\\', '/')
                         
-                        # Set the optimized cover
-                        self.setCoverImage(self.url, tmp_url)
-                        logger.debug("Cover image optimized and set successfully: %s" % cover_url)
+    #                     # Set the optimized cover
+    #                     self.setCoverImage(self.url, tmp_url)
+    #                     logger.debug("Cover image optimized and set successfully: %s" % cover_url)
                         
-                        # Clean up the temporary file
-                        try:
-                            os.unlink(tmp_file_path)
-                        except:
-                            pass
-                    else:
-                        # Set cover directly without optimization
-                        self.setCoverImage(self.url, cover_url)
-                        logger.debug("Cover image set without optimization: %s" % cover_url)
-                except Exception as e:
-                    logger.warning("Failed to set cover image: %s" % e)
+    #                     # Clean up the temporary file
+    #                     try:
+    #                         os.unlink(tmp_file_path)
+    #                     except:
+    #                         pass
+    #                 else:
+    #                     # Set cover directly without optimization
+    #                     self.setCoverImage(self.url, cover_url)
+    #                     logger.debug("Cover image set without optimization: %s" % cover_url)
+    #             except Exception as e:
+    #                 logger.warning("Failed to set cover image: %s" % e)
 
-        # Extract and set tags
-        tags = self.extract_tags(soup)
-        if tags:
-            # Set tags as genre
-            for tag in tags:
-                self.story.addToList('genre', tag)
+    #     # Extract and set tags
+    #     tags = self.extract_tags(soup)
+    #     if tags:
+    #         # Set tags as genre
+    #         for tag in tags:
+    #             self.story.addToList('genre', tag)
                 
-            # Set tags as tags
-            for tag in tags:
-                self.story.addToList('tags', tag)
+    #         # Set tags as tags
+    #         for tag in tags:
+    #             self.story.addToList('tags', tag)
                 
-            # Also set as subject tags
-            for tag in tags:
-                self.story.addToList('subject', tag)
+    #         # Also set as subject tags
+    #         for tag in tags:
+    #             self.story.addToList('subject', tag)
 
-            logger.debug(f"Added tags: {', '.join(tags)}")
+    #         logger.debug(f"Added tags: {', '.join(tags)}")
             
-        # Log current metadata for debugging
-        logger.debug(f"Current genres: {self.story.getList('genre')}")
-        logger.debug(f"Current tags: {self.story.getList('tags')}")
-        logger.debug(f"Current subjects: {self.story.getList('subject')}")
+    #     # Log current metadata for debugging
+    #     logger.debug(f"Current genres: {self.story.getList('genre')}")
+    #     logger.debug(f"Current tags: {self.story.getList('tags')}")
+    #     logger.debug(f"Current subjects: {self.story.getList('subject')}")
 
-        author = soup.find('span', {'itemprop': 'author'})
-        if author:
-            author_name = author.find('meta', {'itemprop': 'name'})['content']
-            author_link = author.find('a')
-            self.story.setMetadata('author', author_name)
-            if author_link:
-                self.story.setMetadata('authorId', author_link['href'].split('/')[-1])
-                self.story.setMetadata('authorUrl', 'https://' + self.getSiteDomain() + author_link['href'])
+    #     author = soup.find('span', {'itemprop': 'author'})
+    #     if author:
+    #         author_name = author.find('meta', {'itemprop': 'name'})['content']
+    #         author_link = author.find('a')
+    #         self.story.setMetadata('author', author_name)
+    #         if author_link:
+    #             self.story.setMetadata('authorId', author_link['href'].split('/')[-1])
+    #             self.story.setMetadata('authorUrl', 'https://' + self.getSiteDomain() + author_link['href'])
 
-        # Get description
-        description = soup.find('div', {'class': 'annotation'})
-        if description:
-            desc_text = description.find('div', {'class': 'rich-content'})
-            self.story.setMetadata('description', desc_text.get_text().strip() if desc_text else '')
+    #     # Get description
+    #     description = soup.find('div', {'class': 'annotation'})
+    #     if description:
+    #         desc_text = description.find('div', {'class': 'rich-content'})
+    #         self.story.setMetadata('description', desc_text.get_text().strip() if desc_text else '')
 
-        # Get status
-        status_label = soup.find('span', {'class': 'label-primary'})
-        if status_label and 'в процессе' in status_label.get_text():
-            self.story.setMetadata('status', 'In-Progress')
-        else:
-            self.story.setMetadata('status', 'Completed')
+    #     # Get status
+    #     status_label = soup.find('span', {'class': 'label-primary'})
+    #     if status_label and 'в процессе' in status_label.get_text():
+    #         self.story.setMetadata('status', 'In-Progress')
+    #     else:
+    #         self.story.setMetadata('status', 'Completed')
 
-        # Get word count
-        word_count = soup.find('span', {'class': 'hint-top'}, text=re.compile(r'.*зн\..*'))
-        if word_count:
-            count = word_count.get_text().strip().split()[0].replace(' ', '')
-            self.story.setMetadata('numWords', count)
+    #     # Get word count
+    #     word_count = soup.find('span', {'class': 'hint-top'}, text=re.compile(r'.*зн\..*'))
+    #     if word_count:
+    #         count = word_count.get_text().strip().split()[0].replace(' ', '')
+    #         self.story.setMetadata('numWords', count)
 
-        # Get publish date
-        pub_date = soup.find('span', {'data-format': 'calendar'})
-        if pub_date:
-            date_str = pub_date.get('data-time', '').split('T')[0]
-            if date_str:
-                self.story.setMetadata('datePublished', makeDate(date_str, self.dateformat))
+    #     # Get publish date
+    #     pub_date = soup.find('span', {'data-format': 'calendar'})
+    #     if pub_date:
+    #         date_str = pub_date.get('data-time', '').split('T')[0]
+    #         if date_str:
+    #             self.story.setMetadata('datePublished', makeDate(date_str, self.dateformat))
 
-        # Get update date
-        update_date = soup.find('span', {'data-format': 'calendar-short'})
-        if update_date:
-            date_str = update_date.get('data-time', '').split('T')[0]
-            if date_str:
-                self.story.setMetadata('dateUpdated', makeDate(date_str, self.dateformat))
+    #     # Get update date
+    #     update_date = soup.find('span', {'data-format': 'calendar-short'})
+    #     if update_date:
+    #         date_str = update_date.get('data-time', '').split('T')[0]
+    #         if date_str:
+    #             self.story.setMetadata('dateUpdated', makeDate(date_str, self.dateformat))
 
-        # Get chapters
-        chapter_list = soup.find('ul', {'class': 'table-of-content'})
-        if not chapter_list:
-            # No chapters found - might be a single chapter story
-            self.add_chapter('Chapter 1', url)
-            self.story.setMetadata('numChapters', 1)
-            return
+    #     # Get chapters
+    #     chapter_list = soup.find('ul', {'class': 'table-of-content'})
+    #     if not chapter_list:
+    #         # No chapters found - might be a single chapter story
+    #         self.add_chapter('Chapter 1', url)
+    #         self.story.setMetadata('numChapters', 1)
+    #         return
             
-        chapters = []
-        for chapter in chapter_list.find_all('li'):
-            chapter_a = chapter.find('a')
-            if not chapter_a:
-                continue
+    #     chapters = []
+    #     for chapter in chapter_list.find_all('li'):
+    #         chapter_a = chapter.find('a')
+    #         if not chapter_a:
+    #             continue
                 
-            title = chapter_a.get_text().strip()
-            chapter_url = 'https://' + self.getSiteDomain() + chapter_a['href']
+    #         title = chapter_a.get_text().strip()
+    #         chapter_url = 'https://' + self.getSiteDomain() + chapter_a['href']
             
-            # Get chapter date
-            date_span = chapter.find('span', {'data-format': 'calendar-xs'})
-            date = None
-            if date_span:
-                date_str = date_span.get('data-time', '').split('T')[0]
-                if date_str:
-                    date = makeDate(date_str, self.dateformat)
+    #         # Get chapter date
+    #         date_span = chapter.find('span', {'data-format': 'calendar-xs'})
+    #         date = None
+    #         if date_span:
+    #             date_str = date_span.get('data-time', '').split('T')[0]
+    #             if date_str:
+    #                 date = makeDate(date_str, self.dateformat)
             
-            chapters.append((title, chapter_url, date))
+    #         chapters.append((title, chapter_url, date))
 
-        # Set chapter count
-        self.story.setMetadata('numChapters', len(chapters))
+    #     # Set chapter count
+    #     self.story.setMetadata('numChapters', len(chapters))
 
-        # Add chapters to story
-        for title, chapter_url, date in chapters:
-            self.add_chapter(title, chapter_url)
+    #     # Add chapters to story
+    #     for title, chapter_url, date in chapters:
+    #         self.add_chapter(title, chapter_url)
 
-        return
+    #     return
 
     def get_request(self, url, **kwargs):
         """
