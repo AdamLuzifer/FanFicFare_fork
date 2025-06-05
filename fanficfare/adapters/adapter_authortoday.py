@@ -161,23 +161,34 @@ class AuthorTodayAdapter(BaseSiteAdapter):
     
             # First step: Get login page and CSRF token
             login_url = f'https://{self.getSiteDomain()}/account/login'
-            response = self.session.get(login_url)
+            logger.debug(f"Fetching login page: {login_url} with timeout=(10, 30)")
+            response = self.session.get(login_url, timeout=(10, 30))
             response.raise_for_status()
+            logger.debug(f"Login page GET response status: {response.status_code}")
+            logger.debug(f"Login page HTML (first 500 chars): {response.text[:500]}")
+            logger.debug(f"Cookies after GET login page: {self.session.cookies.get_dict()}")
     
-            # Extract CSRF token
+            # Extract CSRF token from the specific login form
             soup = BeautifulSoup(response.text, 'html.parser')
-            csrf_input = soup.find('input', {'name': '__RequestVerificationToken'})
+            login_form = soup.find('form', {'action': '/account/login', 'method': 'POST'})
+            if not login_form:
+                raise exceptions.FailedToLogin(url, 'Could not find login form')
+            
+            csrf_input = login_form.find('input', {'name': '__RequestVerificationToken'})
             if not csrf_input:
-                raise exceptions.FailedToLogin(url, 'Could not find CSRF token')
+                raise exceptions.FailedToLogin(url, 'Could not find CSRF token in login form')
             csrf_token = csrf_input.get('value')
+            logger.debug(f"Extracted CSRF token: {csrf_token}")
     
             # Perform login to get LoginCookie
             login_data = {
                 'Login': self.username,
                 'Password': self.password,
                 '__RequestVerificationToken': csrf_token,
-                'RememberMe': 'true'
+                'RememberMe': 'true',
+                'SendEmailIfNeeded': 'false' # Изменяем значение на 'false'
             }
+            logger.debug(f"Login POST data: {login_data}")
     
             headers = {
                 'Content-Type': 'application/x-www-form-urlencoded',
@@ -187,7 +198,13 @@ class AuthorTodayAdapter(BaseSiteAdapter):
                 'Accept': 'application/json, text/javascript, */*; q=0.01'
             }
     
-            response = self.session.post(login_url, data=login_data, headers=headers)
+            logger.debug(f"Posting login data to: {login_url} with timeout=(10, 30)")
+            response = self.session.post(login_url, data=login_data, headers=headers, timeout=(10, 30))
+            
+            logger.debug(f"Login POST response status: {response.status_code}")
+            logger.debug(f"Login POST response text (first 500 chars): {response.text[:500]}")
+            logger.debug(f"Current session cookies: {self.session.cookies.get_dict()}")
+            
             response.raise_for_status()
     
             # Check if we got LoginCookie
@@ -196,7 +213,8 @@ class AuthorTodayAdapter(BaseSiteAdapter):
     
             # Now get the bearer token using LoginCookie
             token_url = f'https://{self.getSiteDomain()}/account/bearer-token'
-            token_response = self.session.get(token_url)
+            logger.debug(f"Fetching bearer token from: {token_url} with timeout=(10, 30)")
+            token_response = self.session.get(token_url, timeout=(10, 30))
             token_response.raise_for_status()
     
             try:
