@@ -1810,15 +1810,9 @@ class FanFicFarePlugin(InterfaceAction):
         # get libs from plugin zip.
         options['plugin_path'] = self.interface_action_base_plugin.plugin_path
 
-        if prefs['single_proc_jobs']: ## YYY Single BG job
-            args = ['calibre_plugins.fanficfare_plugin.jobs',
-                    'do_download_worker_single',
-                    (site, book_list, options, merge)]
-        else: ## MultiBG Job split by site
-            cpus = self.gui.job_manager.server.pool_size
-            args = ['calibre_plugins.fanficfare_plugin.jobs',
-                    'do_download_worker_multiproc',
-                    (site, book_list, options, cpus, merge)]
+        args = ['calibre_plugins.fanficfare_plugin.jobs',
+                'do_download_worker_single',
+                (site, book_list, options, merge)]
         if site:
             desc = _('Download %s FanFiction Book(s) for %s') % (sum(1 for x in book_list if x['good']),site)
         else:
@@ -1833,6 +1827,7 @@ class FanFicFarePlugin(InterfaceAction):
         self.download_job_manager.get_batch(options['tdir']).add_job(site,job)
         job.tdir=options['tdir']
         job.site=site
+        job.orig_book_list = book_list
         # set as part of job, otherwise *changing* reconsolidate_jobs
         # after launch could cause job results to be ignored.
         job.reconsolidate=prefs['reconsolidate_jobs']  # YYY batch update
@@ -2027,12 +2022,27 @@ class FanFicFarePlugin(InterfaceAction):
         site = job.site
         logger.debug("Batch Job:%s %s"%(tdir,site))
         batch = self.download_job_manager.get_batch(tdir)
-        if job.reconsolidate or job.failed: # YYY batch update
+
+        if job.failed:
+            # logger.debug(job.orig_book_list)
+            ## I don't *think* there would be any harm to modifying
+            ## the original book list, but I elect not to chance it.
+            failedjobresult = copy.deepcopy(job.orig_book_list)
+            for x in failedjobresult:
+                if x['good']:
+                    ## may have failed before reaching BG job.
+                    x['good'] = False
+                    x['status'] = _('Error')
+                    x['added'] = False
+                    x['reportorder'] = x['listorder']+10000000 # force to end.
+                    x['comment'] = _('Background Job Failed, see Calibre Jobs log.')
+                    x['showerror'] = True
+            self.gui.job_exception(job, dialog_title=_('Background Job Failed to Download Stories for (%s)')%job.site)
+            job.result = failedjobresult
+
+        if job.reconsolidate: # YYY batch update
             logger.debug("batch.finish_job(%s)"%site)
             batch.finish_job(site)
-        if job.failed:
-            self.gui.job_exception(job, dialog_title='Failed to Download Stories')
-            return
 
         showsite = None
         # set as part of job, otherwise *changing* reconsolidate_jobs
@@ -2042,7 +2052,7 @@ class FanFicFarePlugin(InterfaceAction):
                 book_list = batch.get_results()
             else:
                 return
-        elif not job.failed:
+        else:
             showsite = site
             book_list = job.result
 
@@ -2055,13 +2065,11 @@ class FanFicFarePlugin(InterfaceAction):
         good_list = [ x for x in book_list if x['good'] ]
         bad_list = [ x for x in book_list if not x['good'] ]
         chapter_error_list = [ x for x in book_list if 'chapter_error_count' in  x ]
-        try:
-            good_list = sorted(good_list,key=lambda x : x['reportorder'])
-            bad_list = sorted(bad_list,key=lambda x : x['reportorder'])
-        except KeyError:
-            good_list = sorted(good_list,key=lambda x : x['listorder'])
-            bad_list = sorted(bad_list,key=lambda x : x['listorder'])
-        #print("book_list:%s"%book_list)
+
+        sort_func = lambda x : x.get('reportorder',x['listorder'])
+        good_list = sorted(good_list,key=sort_func)
+        bad_list = sorted(bad_list,key=sort_func)
+
         payload = (good_list, bad_list, options)
 
         msgl = [ _('FanFicFare found <b>%s</b> good and <b>%s</b> bad updates.')%(len(good_list),len(bad_list)) ]
