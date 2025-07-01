@@ -39,6 +39,7 @@ class AuthorTodayAdapter(BaseSiteAdapter):
 
     def __init__(self, config, url):
         BaseSiteAdapter.__init__(self, config, url)
+        logger.debug("AuthorTodayAdapter instance created for URL: %s", url)
         
         # Check required dependencies
         global requests, BeautifulSoup
@@ -52,14 +53,23 @@ class AuthorTodayAdapter(BaseSiteAdapter):
         self.is_adult = self.getConfig('is_adult', False)
         self.user_id = None   # Will be set during login if needed
         self.session = None  # Session for making requests
-        self._logged_in = False  # Track login state
-        self._login_attempts = 0  # Track number of login attempts
-        self._browser_cache_checked = False
-        self.bearer_token = None
-        self.token_expires = None
+        # Используем атрибуты класса для отслеживания состояния входа
+        # Это позволяет сохранять состояние входа между различными экземплярами адаптера
+        # в рамках одной пакетной операции.
+        if not hasattr(self, '_logged_in'):
+            self.__class__._logged_in = False
+            self.__class__._login_attempts = 0
+            self.__class__._browser_cache_checked = False
+            self.__class__.bearer_token = None
+            self.__class__.token_expires = None
+            self.__class__.last_login_time = None
+            self.__class__.user_id = None # Сделаем user_id атрибутом класса
+            self.__class__.session = requests.Session() # Сессия также должна быть общей
         
-        # Initialize session first
-        self.session = requests.Session()
+        logger.debug("AuthorTodayAdapter __init__ called. Initializing class attributes: _logged_in=%s, _login_attempts=%d, _browser_cache_checked=%s, user_id=%s",
+                     self.__class__._logged_in, self.__class__._login_attempts, self.__class__._browser_cache_checked, self.__class__.user_id)
+        
+        self.session = self.__class__.session # Используем общую сессию
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -134,27 +144,34 @@ class AuthorTodayAdapter(BaseSiteAdapter):
         First opens login page in WebView for user authentication,
         then retrieves bearer token using LoginCookie.
         """
-        if self._logged_in:
-            logger.debug('Already logged in')
+        logger.debug("performLogin called. Current _logged_in (class): %s, _login_attempts (class): %d",
+                     self.__class__._logged_in, self.__class__._login_attempts)
+        if self.__class__._logged_in and self.checkLogin(url): # Проверяем, что токен еще действителен
+            logger.debug('Already logged in and token is valid (class attributes).')
             return True
+        
+        logger.debug("Proceeding with login. _logged_in (class): %s, bearer_token (class): %s, token_expires (class): %s",
+                     self.__class__._logged_in,
+                     "present" if self.__class__.bearer_token else "absent",
+                     self.__class__.token_expires)
     
         if not self.username:
             raise exceptions.FailedToLogin(url, 'No username set. Please set username in personal.ini')
         if not self.password:
             raise exceptions.FailedToLogin(url, 'No password set. Please set password in personal.ini')
     
-        self._login_attempts += 1
-        if self._login_attempts > 3:
-            self._login_attempts = 0
+        self.__class__._login_attempts += 1
+        if self.__class__._login_attempts > 3:
+            self.__class__._login_attempts = 0
             raise exceptions.FailedToLogin(url, "Exceeded maximum login attempts (3)")
             
-        logger.debug("Starting login process... (Attempt %d/3)", self._login_attempts)
+        logger.debug("Starting login process... (Attempt %d/3)", self.__class__._login_attempts)
     
         try:
             # Try to use browser cache if enabled and not checked yet
-            if self.getConfig('use_browser_cache', False) and not self._browser_cache_checked:
-                logger.debug("Attempting to use browser cache for login")
-                self._browser_cache_checked = True
+            if self.getConfig('use_browser_cache', False) and not self.__class__._browser_cache_checked:
+                logger.debug("Attempting to use browser cache for login (class attribute)")
+                self.__class__._browser_cache_checked = True
                 cached_cookie = self.get_browser_cookie()
                 if cached_cookie:
                     self.session.cookies.update(cached_cookie)
@@ -223,18 +240,19 @@ class AuthorTodayAdapter(BaseSiteAdapter):
                     raise exceptions.FailedToLogin(url, 'Failed to obtain bearer token')
     
                 # Store the token and update session headers
-                self.bearer_token = token_data['token']
-                self.user_id = str(token_data['userId'])
-                self.token_expires = datetime.strptime(token_data['expires'], "%Y-%m-%dT%H:%M:%SZ")
+                self.__class__.bearer_token = token_data['token']
+                self.__class__.user_id = str(token_data['userId']) # user_id теперь атрибут класса
+                self.__class__.token_expires = datetime.strptime(token_data['expires'], "%Y-%m-%dT%H:%M:%SZ")
     
                 # Update session headers with bearer token
                 self.session.headers.update({
-                    'Authorization': f'Bearer {self.bearer_token}'
+                    'Authorization': f'Bearer {self.__class__.bearer_token}'
                 })
     
-                self._logged_in = True
-                self._login_attempts = 0
-                logger.debug("Successfully obtained bearer token")
+                self.__class__._logged_in = True
+                self.__class__._login_attempts = 0
+                self.__class__.last_login_time = datetime.utcnow() # Устанавливаем время последнего входа
+                logger.debug("Successfully obtained bearer token (class attribute). Expires: %s", self.__class__.token_expires)
                 return True
     
             except (ValueError, KeyError) as e:
@@ -255,21 +273,35 @@ class AuthorTodayAdapter(BaseSiteAdapter):
 
     def checkLogin(self, url):
         """Check if current session is logged in and token is valid."""
-        if not self._logged_in or not self.bearer_token:
+        logger.debug("checkLogin called for URL: %s (Story ID: %s). _logged_in (class): %s, bearer_token (class): %s, token_expires (class): %s",
+                     url, self.story.getMetadata('storyId'),
+                     self.__class__._logged_in,
+                     "present" if self.__class__.bearer_token else "absent",
+                     self.__class__.token_expires)
+        
+        if not self.__class__._logged_in or not self.__class__.bearer_token:
+            logger.debug("Not logged in or no bearer token (class attributes).")
             return False
             
         # Check if token has expired
-        if self.token_expires and datetime.utcnow() > self.token_expires:
-            logger.debug("Bearer token has expired")
+        if self.__class__.token_expires and datetime.utcnow() > self.__class__.token_expires:
+            logger.debug("Bearer token has expired (class attribute). Resetting login state.")
+            self.__class__._logged_in = False # Сбрасываем флаг, чтобы performLogin был вызван снова
+            self.__class__.bearer_token = None
+            self.__class__.token_expires = None
             return False
             
-        try:
-            # Try to make a test request to verify token
-            test_url = f'https://{self.getSiteDomain()}/api/v1/profile'
-            response = self.session.get(test_url)
-            return response.status_code == 200
-        except:
+        # Проверяем, что токен не истечет в ближайшее время (например, через 5 минут)
+        if self.__class__.token_expires and (self.__class__.token_expires - datetime.utcnow()).total_seconds() < 300:
+            logger.debug("Bearer token will expire soon (less than 5 minutes) (class attribute). Resetting login state.")
+            self.__class__._logged_in = False
+            self.__class__.bearer_token = None
+            self.__class__.token_expires = None
             return False
+
+        # No longer making a test request to verify token, relying on token_expires
+        logger.debug("Token is considered valid based on expiration time (class attribute).")
+        return True
             
     def get_browser_cookie(self):
         """Get cached browser cookies if available."""
@@ -301,14 +333,14 @@ class AuthorTodayAdapter(BaseSiteAdapter):
         logger.debug(f"decrypt_chapter_text called:")
         logger.debug(f"  reader_secret type: {type(reader_secret)}, value: {reader_secret}")
         logger.debug(f"  encrypted_text type: {type(encrypted_text)}, length: {len(encrypted_text) if encrypted_text else 0}")
-        logger.debug(f"  self.user_id type: {type(self.user_id)}, value: {self.user_id}")
+        logger.debug(f"  self.__class__.user_id type: {type(self.__class__.user_id)}, value: {self.__class__.user_id}") # Используем user_id класса
         try:
             if not encrypted_text or not reader_secret:
                 logger.error("Missing encrypted_text or reader_secret")
                 return ''
                 
             # Create decryption key by reversing reader_secret and appending user_id
-            key = reader_secret[::-1] + "@_@" + (self.user_id or "")
+            key = reader_secret[::-1] + "@_@" + (self.__class__.user_id or "") # Используем user_id класса
             key_len = len(key)
             text_len = len(encrypted_text)
         
@@ -347,8 +379,10 @@ class AuthorTodayAdapter(BaseSiteAdapter):
         Возвращает список тегов из API, включая метку 18+ если AdultOnly=true.
         """
         try:
-            # Attempt to log in if not already logged in
-            if not self._logged_in:
+            logger.debug("extract_tags called. Checking login status...")
+            # Attempt to log in if not already logged in or token expired
+            if not self.checkLogin(self.url):
+                logger.debug("Not logged in or token expired in extract_tags. Performing login...")
                 self.performLogin(self.url)
             
             # Получаем ID книги из URL
@@ -359,18 +393,13 @@ class AuthorTodayAdapter(BaseSiteAdapter):
             api_url = f'https://api.author.today/v1/work/{story_id}/details'
             
             # More robust token handling
-            if not self.bearer_token:
-                logger.warning("Bearer token not found. Attempting to retrieve a new token.")
-                try:
-                    # Retry login to get a fresh token
-                    self.performLogin(self._getURL())
-                except Exception as e:
-                    logger.error(f"Failed to obtain bearer token: {e}")
-                    return self._extract_tags_from_html(soup)
+            if not self.__class__.bearer_token: # Используем атрибут класса
+                logger.warning("Bearer token still not found after login attempt in extract_tags. Falling back to HTML parsing.")
+                return self._extract_tags_from_html(soup)
 
             # Делаем запрос к API
             headers = {
-                'Authorization': f'Bearer {self.bearer_token}'
+                'Authorization': f'Bearer {self.__class__.bearer_token}' # Используем атрибут класса
             }
             
             response = self.session.get(api_url, headers=headers)
@@ -471,10 +500,12 @@ class AuthorTodayAdapter(BaseSiteAdapter):
 
     def extractChapterUrlsAndMetadata(self):
         try:
-            # Attempt to log in if not already logged in
-            if not self._logged_in:
+            logger.debug("extractChapterUrlsAndMetadata called. Checking login status...")
+            # Attempt to log in if not already logged in or token expired
+            if not self.checkLogin(self.url):
+                logger.debug("Not logged in or token expired in extractChapterUrlsAndMetadata. Performing login...")
                 self.performLogin(self.url)
-
+ 
             # Получаем ID книги из URL
             story_id = self.story.getMetadata('storyId')
             
@@ -512,21 +543,16 @@ class AuthorTodayAdapter(BaseSiteAdapter):
                     logger.debug(f"API response: {response.text if 'response' in locals() else 'No response'}")
 
             # More robust token handling
-            if not self.bearer_token:
-                logger.warning("Bearer token not found. Attempting to retrieve a new token.")
-                try:
-                    # Retry login to get a fresh token
-                    self.performLogin(self.url)
-                except Exception as e:
-                    logger.error(f"Failed to obtain bearer token: {e}")
-                    raise exceptions.StoryDoesNotExist(self.url) from e
-
+            if not self.__class__.bearer_token: # Используем атрибут класса
+                logger.warning("Bearer token still not found after login attempt in extractChapterUrlsAndMetadata. Cannot proceed.")
+                raise exceptions.StoryDoesNotExist(self.url) # Удален лишний аргумент
+ 
             # Формируем URL для API запроса
             api_url = f'https://api.author.today/v1/work/{story_id}/details'
             
             # Делаем запрос к API
             headers = {
-                'Authorization': f'Bearer {self.bearer_token}'
+                'Authorization': f'Bearer {self.__class__.bearer_token}' # Используем атрибут класса
             }
             
             response = self.session.get(api_url, headers=headers)
@@ -910,8 +936,10 @@ class AuthorTodayAdapter(BaseSiteAdapter):
         
         self.chapters_processed += 1
         
+        logger.debug("getChapterText called for URL: %s. Checking login status...", url)
         # Ensure we're logged in before proceeding
-        if not self._logged_in:
+        if not self.checkLogin(url):
+            logger.debug("Not logged in or token expired in getChapterText. Performing login...")
             self.performLogin(url)
         
         # Extract work_id and chapter_id from URL
@@ -928,8 +956,8 @@ class AuthorTodayAdapter(BaseSiteAdapter):
         
         try:
             # Ensure we have bearer token
-            if not self.bearer_token:
-                logger.error("No bearer token available")
+            if not self.__class__.bearer_token: # Используем атрибут класса
+                logger.error("No bearer token available (class attribute)")
                 return ""
     
             # Формируем URL запроса, как в JavaScript скрипте
@@ -941,7 +969,7 @@ class AuthorTodayAdapter(BaseSiteAdapter):
 
             # Set headers similar to JavaScript, including Authorization
             headers = {
-                'Authorization': f'Bearer {self.bearer_token}',
+                'Authorization': f'Bearer {self.__class__.bearer_token}', # Используем атрибут класса
                 'Accept': 'application/json, text/javascript, */*; q=0.01',
                 'Origin': f'https://{self.getSiteDomain()}',
                 'Referer': f'https://{self.getSiteDomain()}/reader/{work_id}',
