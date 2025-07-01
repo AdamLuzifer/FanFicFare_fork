@@ -46,10 +46,13 @@ class TLRulateRuAdapter(BaseSiteAdapter):
         self._setURL('https://' + self.getSiteDomain() + '/book/' + self.story.getMetadata('storyId'))
         
         # Добавляем переменные для отладки
-        self._is_logged_in = False
-        self._login_attempts = 0
-        self._total_requests = 0
-        self._session = requests.Session()  # Создаем сессию
+        if not hasattr(self.__class__, '_is_logged_in'):
+            self.__class__._is_logged_in = False
+            self.__class__._login_attempts = 0
+            self.__class__._total_requests = 0
+            self.__class__._session = requests.Session()  # Создаем сессию
+        logger.debug("TLRulateRuAdapter __init__ called. Initializing class attributes: _is_logged_in=%s, _login_attempts=%d, _total_requests=%d",
+                     self.__class__._is_logged_in, self.__class__._login_attempts, self.__class__._total_requests)
 
     @staticmethod
     def getSiteDomain():
@@ -327,54 +330,54 @@ class TLRulateRuAdapter(BaseSiteAdapter):
 
     def get_request(self, url, **kwargs):
         """Перехватываем все запросы для подсчета и используем сессию"""
-        self._total_requests += 1
-        print(f"[DEBUG] Запрос #{self._total_requests} к {url}")
-        print(f"[DEBUG] Текущие куки: {self._session.cookies.get_dict()}")
+        self.__class__._total_requests += 1
+        logger.debug(f"[DEBUG] Запрос #{self.__class__._total_requests} к {url}")
+        logger.debug(f"[DEBUG] Текущие куки: {self.__class__._session.cookies.get_dict()}")
         
-        response = self._session.get(url, **kwargs)
+        response = self.__class__._session.get(url, **kwargs)
         return response.text  # Возвращаем текст вместо content
 
     def post_request(self, url, data, **kwargs):
         """Перехватываем все POST запросы для подсчета и используем сессию"""
-        self._total_requests += 1
-        print(f"[DEBUG] POST запрос #{self._total_requests} к {url}")
-        print(f"[DEBUG] Текущие куки: {self._session.cookies.get_dict()}")
+        self.__class__._total_requests += 1
+        logger.debug(f"[DEBUG] POST запрос #{self.__class__._total_requests} к {url}")
+        logger.debug(f"[DEBUG] Текущие куки: {self.__class__._session.cookies.get_dict()}")
         
-        response = self._session.post(url, data=data, **kwargs)
+        response = self.__class__._session.post(url, data=data, **kwargs)
         return response.text  # Возвращаем текст вместо content
 
     def login(self):
         """Login to tl.rulate.ru"""
-        self._login_attempts += 1
-        print(f"[DEBUG] Попытка логина #{self._login_attempts}")
+        self.__class__._login_attempts += 1
+        logger.debug(f"[DEBUG] Попытка логина #{self.__class__._login_attempts}")
         
-        if self._is_logged_in:
-            print("[DEBUG] Пропускаем логин - уже авторизованы")
+        if self.__class__._is_logged_in:
+            logger.debug("[DEBUG] Пропускаем логин - уже авторизованы")
             return True
             
         # Получаем страницу с формой логина
-        initial_response = self._session.get(self.url)
+        initial_response = self.__class__._session.get(self.url)
         soup = self.make_soup(initial_response.text)
         
         # Ищем скрытое поле с CSRF-токеном
         csrf_meta = soup.find('meta', {'name': 'csrf-token'})
         if csrf_meta:
             csrf_token = csrf_meta.get('content')
-            print(f"[DEBUG] CSRF токен из meta: {csrf_token}")
+            logger.debug(f"[DEBUG] CSRF токен из meta: {csrf_token}")
         else:
-            print("[DEBUG] CSRF токен не найден в meta!")
+            logger.debug("[DEBUG] CSRF токен не найден в meta!")
             csrf_token = None
             
         # Выводим HTML формы для отладки
         login_form = soup.select_one('#header-login form')
         if login_form:
-            print("Найдена форма логина:")
-            print(login_form.prettify())
+            logger.debug("Найдена форма логина:")
+            # logger.debug(login_form.prettify()) # Слишком много вывода
         else:
-            print("Форма логина не найдена!")
+            logger.debug("Форма логина не найдена!")
             return False
             
-        print("Отправляем данные для авторизации...")
+        logger.debug("Отправляем данные для авторизации...")
         
         # Формируем данные для отправки
         login_data = {
@@ -386,10 +389,10 @@ class TLRulateRuAdapter(BaseSiteAdapter):
         if csrf_token:
             login_data['_csrf'] = csrf_token
             
-        print(f"Подготовленные данные для отправки (без пароля):")
+        logger.debug(f"Подготовленные данные для отправки (без пароля):")
         safe_data = login_data.copy()
         safe_data['login[pass]'] = '****'
-        print(safe_data)
+        logger.debug(safe_data)
         
         # Добавляем заголовки
         headers = {
@@ -403,39 +406,39 @@ class TLRulateRuAdapter(BaseSiteAdapter):
         
         # Отправляем на корневой URL
         login_url = 'https://' + self.getSiteDomain() + '/'
-        print(f"Отправляем запрос на: {login_url}")
+        logger.debug(f"Отправляем запрос на: {login_url}")
         
         try:
             # Отправляем POST-запрос для логина
-            response = self._session.post(login_url, data=login_data, headers=headers)
+            response = self.__class__._session.post(login_url, data=login_data, headers=headers)
             
             # Проверяем успешность логина
             soup = self.make_soup(response.text)
             if soup.select_one('#header-login'):
-                print("Ошибка авторизации! Проверьте логин и пароль.")
-                print(f"[DEBUG] Куки после неудачного логина: {self._session.cookies.get_dict()}")
-                self._is_logged_in = False
+                logger.debug("Ошибка авторизации! Проверьте логин и пароль.")
+                logger.debug(f"[DEBUG] Куки после неудачного логина: {self.__class__._session.cookies.get_dict()}")
+                self.__class__._is_logged_in = False
                 return False
                 
-            print("Авторизация успешно завершена!")
-            print(f"[DEBUG] Куки после успешного логина: {self._session.cookies.get_dict()}")
-            self._is_logged_in = True
+            logger.debug("Авторизация успешно завершена!")
+            logger.debug(f"[DEBUG] Куки после успешного логина: {self.__class__._session.cookies.get_dict()}")
+            self.__class__._is_logged_in = True
             return True
             
         except Exception as e:
-            print(f"Ошибка при авторизации: {str(e)}")
-            self._is_logged_in = False
+            logger.error(f"Ошибка при авторизации: {str(e)}")
+            self.__class__._is_logged_in = False
             return False
         
     def is_logged_in(self):
         """Check if we're logged in"""
-        print(f"[DEBUG] Проверка авторизации (попыток: {self._login_attempts}, запросов: {self._total_requests})")
+        logger.debug(f"[DEBUG] Проверка авторизации (попыток: {self.__class__._login_attempts}, запросов: {self.__class__._total_requests})")
         
-        if self._is_logged_in:
-            print("[DEBUG] Используем сохраненное состояние авторизации")
+        if self.__class__._is_logged_in:
+            logger.debug("[DEBUG] Используем сохраненное состояние авторизации")
             return True
             
         soup = self.make_soup(self.get_request(self.url))
-        self._is_logged_in = not bool(soup.select_one('#header-login'))
-        print(f"[DEBUG] Результат проверки авторизации: {'успех' if self._is_logged_in else 'не авторизован'}")
-        return self._is_logged_in
+        self.__class__._is_logged_in = not bool(soup.select_one('#header-login'))
+        logger.debug(f"[DEBUG] Результат проверки авторизации: {'успех' if self.__class__._is_logged_in else 'не авторизован'}")
+        return self.__class__._is_logged_in
