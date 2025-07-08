@@ -468,7 +468,14 @@ def do_download(arg,
             # returns int adjusted for start-end range.
             urlchaptercount = adapter.getStoryMetadataOnly().getChapterCount()
 
-            if chaptercount == urlchaptercount and not options.metaonly and not options.updatealways:
+            # Проверяем, есть ли галерея, которую нужно обновить
+            has_gallery_update = (hasattr(adapter, 'hasGalleryForUpdate') and 
+                                 adapter.hasGalleryForUpdate() and 
+                                 options.update)
+            
+            logger.debug(f"Update check: chaptercount={chaptercount}, urlchaptercount={urlchaptercount}, has_gallery_update={has_gallery_update}, update={options.update}, updatealways={options.updatealways}")
+            
+            if chaptercount == urlchaptercount and not options.metaonly and not options.updatealways and not has_gallery_update:
                 print('%s already contains %d chapters.' % (output_filename, chaptercount))
             elif chaptercount > urlchaptercount and not (options.updatealways and adapter.getConfig('force_update_epub_always')):
                 warn('%s contains %d chapters, more than source: %d.' % (output_filename, chaptercount, urlchaptercount))
@@ -498,6 +505,10 @@ def do_download(arg,
                 else:
                     metadata = adapter.story.getAllMetadata()
                 call(string.Template(adapter.getConfig('pre_process_cmd')).substitute(metadata), shell=True)
+
+                # Force overwrite when gallery needs updating
+                if has_gallery_update:
+                    configuration.set('overrides', 'always_overwrite', 'true')
 
                 output_filename = write_story(configuration, adapter, 'epub',
                                               nooutput=options.nooutput)

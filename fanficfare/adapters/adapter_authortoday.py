@@ -683,6 +683,9 @@ class AuthorTodayAdapter(BaseSiteAdapter):
             if data.get('galleryImages'):
                 gallery_images = data['galleryImages']
                 if gallery_images:
+                    # Сохраняем изображения галереи для возможного обновления
+                    self.gallery_images = gallery_images
+                    
                     # Создаем специальную главу для галереи
                     gallery_chapter_title = "Доп. материалы"
                     logger.debug(f"Creating gallery chapter with {len(gallery_images)} images")
@@ -691,8 +694,9 @@ class AuthorTodayAdapter(BaseSiteAdapter):
                     gallery_html = self.make_gallery_chapter(gallery_images)
                     self.chapter_gallery_content = gallery_html
                     
-                    # Добавляем главу галереи последней
-                    self.add_chapter(gallery_chapter_title, None)
+                    # Добавляем главу галереи последней с специальным URL
+                    gallery_url = f"{self.url}#gallery"
+                    self.add_chapter(gallery_chapter_title, gallery_url)
                     logger.debug("Added gallery chapter")
 
             # Отладочная информация об изображениях в ImageStore
@@ -929,12 +933,31 @@ class AuthorTodayAdapter(BaseSiteAdapter):
         
         return response
 
+    def getChapterTextNum(self, url, index):
+        """Override to handle gallery chapter updates during -u flag"""
+        # Если это глава галереи и есть старые главы (обновление), то принудительно обновляем галерею
+        if url and '#gallery' in url and (self.oldchapters or self.oldchaptersmap):
+            logger.debug("Force updating gallery chapter during update - regenerating gallery content")
+            # Принудительно пересоздаем галерею
+            if hasattr(self, 'gallery_images') and self.gallery_images:
+                gallery_html = self.make_gallery_chapter(self.gallery_images)
+                self.chapter_gallery_content = gallery_html
+                logger.debug("Gallery chapter content refreshed for update")
+        
+        return self.getChapterText(url)
+
+    def hasGalleryForUpdate(self):
+        """Check if this story has a gallery that should be updated"""
+        has_gallery = hasattr(self, 'gallery_images') and self.gallery_images and len(self.gallery_images) > 0
+        logger.debug(f"hasGalleryForUpdate check: hasattr(gallery_images)={hasattr(self, 'gallery_images')}, gallery_images={getattr(self, 'gallery_images', None)}, result={has_gallery}")
+        return has_gallery
+
     def getChapterText(self, url):
         """Get chapter text using Author.Today API"""
         logger.debug('Getting chapter text from: %s' % url)
         
-        # Если это глава галереи (url=None)
-        if url is None and hasattr(self, 'chapter_gallery_content'):
+        # Если это глава галереи (url содержит #gallery)
+        if url and '#gallery' in url and hasattr(self, 'chapter_gallery_content'):
             logger.debug("Returning gallery chapter content")
             return self.chapter_gallery_content
         
