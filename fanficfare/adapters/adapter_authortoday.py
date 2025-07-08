@@ -533,8 +533,6 @@ class AuthorTodayAdapter(BaseSiteAdapter):
                                     parenturl=self.url,
                                     url=img_url,
                                     cover=False,
-                                    gallery=True,
-                                    caption=caption,
                                     fetch=self.get_request_raw
                                 )
                                 logger.debug(f"Added gallery image: {img_url} ({caption})")
@@ -696,6 +694,12 @@ class AuthorTodayAdapter(BaseSiteAdapter):
                     # Добавляем главу галереи последней
                     self.add_chapter(gallery_chapter_title, None)
                     logger.debug("Added gallery chapter")
+
+            # Отладочная информация об изображениях в ImageStore
+            img_store_images = self.story.getImgUrls()
+            logger.debug(f"Images in ImageStore: {len(img_store_images)}")
+            for i, img in enumerate(img_store_images):
+                logger.debug(f"  Image {i}: {img.get('newsrc', 'no newsrc')} -> {img.get('url', 'no url')}")
 
             # Обновляем количество глав
             total_chapters = len(chapters) + (1 if data.get('galleryImages') else 0)
@@ -1422,9 +1426,11 @@ class AuthorTodayAdapter(BaseSiteAdapter):
         """Создает HTML-контент для главы с галереей"""
         html = ['<div class="gallery-chapter">']
         
-        def fetch_image(url, referer=None):
+        def fetch_image(url, referer=None, image=False):
             """Функция для загрузки изображения с поддержкой referer"""
-            return self.download_image(url)
+            # Принудительно загружаем изображение напрямую, игнорируя кэш
+            # чтобы гарантировать загрузку всех изображений галереи
+            return self.get_request_raw(url, referer=referer, image=image)
         
         # Начальный номер для изображений
         image_counter = 0

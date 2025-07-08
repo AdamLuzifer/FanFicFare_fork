@@ -138,8 +138,8 @@ def get_update_data(inputio,
                                     # remove all .. and the path part above it, if present.
                                     # Mostly for epubs edited by Sigil.
                                     newsrc = re.sub(r"([^/]+/\.\./)","",newsrc)
-                                    longdesc=img['longdesc']
-                                    img['src'] = img['longdesc']
+                                    longdesc=img.get('longdesc', newsrc)
+                                    img['src'] = img.get('longdesc', newsrc)
                                     data = epub.read(newsrc)
                                     images[longdesc] = data
                                 except Exception as e:

@@ -547,6 +547,7 @@ div { margin: 0pt; padding: 0pt; }
         coverIO = None
 
         coverimgid = "image0000"
+        oldcoverimghref = None  # Initialize to prevent UnboundLocalError
         if self.use_oldcover:
             logger.debug("using old cover")
             (oldcoverhtmlhref,
@@ -576,11 +577,14 @@ div { margin: 0pt; padding: 0pt; }
 
         if self.getConfig('include_images'):
             imgcount=0
+            logger.debug(f"Writing images to EPUB. use_oldcover: {self.use_oldcover}, oldcoverimghref: {oldcoverimghref}")
             for imgmap in self.story.getImgUrls():
                 imgfile = "OEBPS/"+imgmap['newsrc']
+                logger.debug(f"Processing image: {imgfile}, data length: {len(imgmap.get('data', b''))}")
                 # don't overwrite old cover.
                 if not self.use_oldcover or imgfile != oldcoverimghref:
                     outputepub.writestr(imgfile,imgmap['data'])
+                    logger.debug(f"Written image to EPUB: {imgfile}")
                     items.append(("image%04d"%imgcount,
                                   imgfile,
                                   imgmap['mime'],
@@ -590,6 +594,9 @@ div { margin: 0pt; padding: 0pt; }
                         # make sure coverimgid is set to the cover, not
                         # just the first image.
                         coverimgid = items[-1][0]
+                else:
+                    logger.debug(f"Skipped image (old cover): {imgfile}")
+            logger.debug(f"Total images written: {imgcount}")
 
 
         items.append(("style","OEBPS/stylesheet.css","text/css",None))
